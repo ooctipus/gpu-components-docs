@@ -399,7 +399,7 @@
     function acquire() { const sp = spare(); if (sp.length) return sp[0]; if (retained() >= BUDGET) return null; const h = { id: S.nextHandle++, owner: null, vslot: null }; S.handles.push(h); return h; }
     function grow(k) {
       const st = STORES[k]; const next = S.mapped[k].length;
-      if (next >= st.granules) { log.add(`${st.name}: every virtual granule is already mapped.`, "bad"); return; }
+      if (next >= st.granules) { log.add(`${st.name}: all ${st.granules} granules of the ${st.granules * GRANULE} MiB reservation are mapped, so all ${st.slots.toLocaleString()} planned slots are ready. The reservation is the ceiling; more worlds would need a new storage.`, "bad"); return; }
       const h = acquire();
       if (!h) { log.add(`map (${st.name}) → MemoryError before any driver call: ${retained()} handles retained, budget ${BUDGET}. Nothing changed.`, "bad"); render(); return; }
       const reused = S.handles.includes(h) && h.id < S.nextHandle - 1 && spare().includes(h);
@@ -416,7 +416,7 @@
     }
     function trim() { const sp = spare(); if (!sp.length) { log.add("trim → no spare handles to release.", "bad"); return; } S.handles = S.handles.filter((h) => h.owner !== null); log.add(`trim → cuMemRelease on ${sp.length} spare handle(s); budget use drops to ${retained()}.`, "good"); render(); }
     function reset() { S.handles = []; S.nextHandle = 0; S.mapped = STORES.map(() => []); S.joined = false; log.add("reserve → two contiguous virtual ranges, nothing mapped. Virtual space is free; the budget counts physical handles only."); for (let i = 0; i < 4; i++) grow(0); for (let i = 0; i < 3; i++) grow(1); }
-    function render() {
+    let render = function () {
       figure.innerHTML = "";
       const W = 860, x0 = 170, gw = 42; const s = svg("svg", { viewBox: `0 0 ${W} 300`, width: "100%" });
       s.appendChild(svg("text", { x: 16, y: 18, "font-size": 12, "font-weight": "600", fill: C.text, text: "virtual: one contiguous reservation per storage = planned maximum worlds × Data per world; same 24 MiB ceiling for both" }));
@@ -452,8 +452,10 @@
       stats.innerHTML = "";
       const vtotal = STORES.reduce((a, st) => a + st.granules * GRANULE, 0), mapped = S.handles.filter((h) => h.owner !== null).length;
       [["virtual reserved", `${vtotal} MiB (costs nothing)`], ["physical mapped", `${mapped * GRANULE} MiB`], ["spare (unmapped, retained)", `${spare().length * GRANULE} MiB`], ["budget in use", `${retained()} / ${BUDGET} handles`]].forEach(([k, v]) => stats.appendChild(stat(k, v)));
-    }
-    root.appendChild(el("div", { class: "gc-toolbar" }, [button("Grow cartpole", () => grow(0), true), button("Grow G1", () => grow(1), true), button("Shrink cartpole (joined)", () => shrink(0)), button("Shrink G1 (joined)", () => shrink(1)), button("trim spare handles", trim), button("Reset", reset)]));
+    };
+    const growBtns = [button("Grow cartpole", () => grow(0), true), button("Grow G1", () => grow(1), true)];
+    root.appendChild(el("div", { class: "gc-toolbar" }, [growBtns[0], growBtns[1], button("Shrink cartpole (joined)", () => shrink(0)), button("Shrink G1 (joined)", () => shrink(1)), button("trim spare handles", trim), button("Reset", reset)]));
+    const origRender = render; render = function () { origRender(); STORES.forEach((st, k) => { const full = S.mapped[k].length >= st.granules; growBtns[k].disabled = full; growBtns[k].textContent = full ? `${st.name.split(" ")[0]}: reservation fully mapped` : `Grow ${st.name.split(" ")[0]}`; }); };
     root.appendChild(el("div", { class: "gc-hint", text: "Top: contiguous virtual ranges, one per storage, sized for the maximum population. Bottom: the pool of physical granule handles the budget counts. Curves show which handle backs which virtual granule." }));
     root.appendChild(figure); root.appendChild(stats); root.appendChild(log.box);
     reset();
