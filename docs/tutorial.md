@@ -28,21 +28,21 @@ state = fields.allocate(
     protected_count=worlds.data.live_count[0:1],
     fields=(FieldSpec("position", (), wp.vec3), FieldSpec("velocity", (), wp.vec3)),
     backing=pages,
-    initial_ready_count=65536,                         # one 2 MiB granule at 32 bytes per slot
+    initial_ready_count=65536,                         # one 2 MiB page at 32 bytes per slot
 )
 print(state.ready_rows, fields.memory_report(state)["mapped_packed_bytes"])   # 65536 2097152
 ```
 
 ```mermaid
 flowchart LR
-    R["reserve 262144 slots of virtual address<br/>(no physical cost)"] --> M["map one 2 MiB granule = 65536 slots"]
+    R["reserve 262144 slots of virtual address<br/>(no physical cost)"] --> M["map one 2 MiB page = 65536 slots"]
     M --> P["publish_ready: ready_count = 65536"]
     P --> I["initialize slots 0..65535"]
 ```
 
-Physical pages are mapped in whole granules, 2 MiB on current drivers. A requested ready count rounds up to the granule boundary, so `initial_ready_count=256` on a 4096-slot storage maps and publishes all 4096 slots. Choose a capacity larger than one granule if you need to observe growth.
+Physical pages are mapped in whole pages, 2 MiB on current drivers. A requested ready count rounds up to the page boundary, so `initial_ready_count=256` on a 4096-slot storage maps and publishes all 4096 slots. Choose a capacity larger than one page if you need to observe growth.
 
-The budget is checked before any driver call. If a mapping would exceed it, `map` raises `MemoryError` and no state has changed. If the driver fails part way, the ledger is rolled back granule by granule; anything that cannot be rolled back remains owned and is reported in the exception.
+The budget is checked before any driver call. If a mapping would exceed it, `map` raises `MemoryError` and no state has changed. If the driver fails part way, the ledger is rolled back page by page; anything that cannot be rolled back remains owned and is reported in the exception.
 
 ## Step 2. Commands
 
@@ -184,7 +184,7 @@ With the custom Warp branch the count is declared at the call site instead: `d.n
 When more worlds are needed than are ready, map more pages and publish the new readiness. Mapping never-mapped pages does not require waiting for readers, since no kernel can address those pages yet.
 
 ```python
-needed = 131072                                       # two granules
+needed = 131072                                       # two pages
 if fields.can_map_backing_without_join(state, needed):
     mapped_rows = fields.map_backing(state, needed)   # maps and grants access; publishes nothing
     # initialize slots [65536, mapped_rows) on the current stream
@@ -212,10 +212,10 @@ Shrinking is different. Published slots may have readers in flight, so shrinking
 
 ```python
 with backing.maintenance(pages, streams=(wp.get_stream().cuda_stream,)):
-    fields.resize_backing(state, 60000)   # publish lower readiness, then unmap the second granule
+    fields.resize_backing(state, 60000)   # publish lower readiness, then unmap the second page
 ```
 
-Shrinking also rounds to granules: a target of 70000 slots still needs two granules and unmaps nothing, while 60000 slots releases one.
+Shrinking also rounds to pages: a target of 70000 slots still needs two pages and unmaps nothing, while 60000 slots releases one.
 
 ## Step 7. Compaction
 

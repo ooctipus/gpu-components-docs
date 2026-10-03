@@ -1,85 +1,54 @@
 ---
 id: structure
 title: Four parts
-sidebar_position: 3
+sidebar_position: 4
 ---
 
 # Four parts
 
-In the example, four separate jobs were hiding inside "one `Data` with eight worlds." The package gives each job to one module.
+Take the cartpole and G1 scene with 6 cartpoles and 2 G1s live. One reset, in which cartpole world 3's episode ends and the curriculum swaps a G1 into its place while the training loop also wants one more cartpole, touches four kinds of state. Each kind belongs to one module, and nothing else writes it.
 
-| Job, in the example | Module | What it owns |
+| Module | Owns | In the scene, right now |
 |---|---|---|
-| Know that slots 2 and 5 are free, that world 7 is now at generation 2, and that a reference to generation 1 is stale | `directory` | identities, generations, placement, admission, compaction |
-| Hold the `qpos` and `qvel` columns, fill a new world's rows, copy world 7 into slot 2 during compaction | `fields` | typed slots, fills, copies, indexed transfers, readiness |
-| Reserve address space for 4096 cartpoles and 256 G1s but only pay for the pages behind the worlds in use; count a freed G1 as sixteen cartpoles of budget; add pages when the ninth cartpole arrives | `backing` | virtual reservations, physical pages, a byte budget |
-| Record the step once and have the cartpole kernels follow the cartpole count and the G1 kernels follow the G1 count, without re-recording | `graph` | kernel nodes that resize themselves from a device-side count |
+| `directory` | who is where: for each identity its prototype, slot and generation; for each prototype its live count and free slots | identity 3 → cartpole, slot 3, generation 1. `live_count = [6, 2]`. Cartpole slots 6 and up are free |
+| `fields` | the bytes of each slot: one packed row per slot holding `qpos`, `qvel` and the other `Data` columns; how many rows are ready | cartpole storage: 1,536 B per row, 5,461 rows ready, rows 0 to 5 hold state |
+| `backing` | the pages under the rows: one reserved range per storage, which pages are mapped, the pool, the budget | cartpole range 32 MiB reserved, 4 pages mapped; G1 range 3 pages; pool 9; budget 16 |
+| `graph` | the kernel nodes in the captured step and which device count each one follows | `cartpole_step` ← `live_count[0]`, `g1_step` ← `live_count[1]` |
 
-The package has no notion of cartpoles, Models or contacts. Newton supplies those meanings, chooses which count drives which kernel, and orders the work. The package supplies relations, storage and replay.
+Newton sits above all four. It decides which world a handle means, which count drives which kernel, when to map pages, and in what order to call things. The package never decides any of that.
 
-```mermaid
-flowchart LR
-    subgraph Fixed["Fixed Data"]
-        direction TB
-        A1[Allocate 8 worlds] --> A2[Record step at nworld = 8]
-        A2 --> A3[Replay]
-        A3 -->|episode ends| A4[Mask dead worlds;<br/>they still cost]
-        A3 -->|need a 9th| A5[Reallocate,<br/>re-record,<br/>host sync]
-    end
-    subgraph Dynamic["With this package"]
-        direction TB
-        B1[Reserve 4096 worlds once] --> B2[Record step once]
-        B2 --> B3[Replay]
-        B3 -->|episode ends| B4[Destroy on device;<br/>slot freed]
-        B3 -->|need a 9th| B5[Map a page,<br/>publish readiness;<br/>no re-record]
-        B4 --> B3
-        B5 --> B3
-    end
-```
+## One reset through the four parts
 
-## Two prototypes, one directory, one budget
+<div class="gc-widget" data-widget="walkthrough"></div>
 
-```
-directory.allocate(slot_limits=(4096, 256))      # cartpole slots, G1 slots
+Two things to notice. Every call from the directory's `begin` to the graph replay is device work inside the captured step; the host only wrote the commands. And the fields and backing panels barely move: a reset at a fixed mix changes who is where, not where the bytes are.
 
-slot_starts:   [0,            4096,        4352]
-               |--- cartpole partition ---|-- G1 --|
-live_count:    [   6         ,     7    ]
-free:          [ 4090        ,   249    ]
-
-backing budget, in bytes:
-   one cartpole world  ≈  1 unit        one G1 world ≈ 16 units
-   freeing G1 slot 5 returns 16 units; creating a cartpole costs 1
-```
-
-Each prototype has its own slot partition, its own live and free counts, and its own `FieldStorage` with its own Data layout. All of them draw on one byte budget in `backing`, which is where the sixteen-to-one ratio is enforced: a G1 storage maps sixteen times the bytes per slot, so the same budget holds sixteen times fewer G1 worlds than cartpoles. Each prototype's kernels are bound to that prototype's count, so the G1 step never runs over cartpole slots and vice versa.
-
-## How the modules relate
+## Who calls whom
 
 ```mermaid
 flowchart TB
-    Engine["Newton, MJWarp, or your own engine<br/>owns meaning, counts, ordering"]
+    Engine["Newton<br/>decides handles, counts, ordering, when to map"]
     Engine --> directory
     Engine --> fields
-    Engine --> graph
+    Engine --> graphmod
     subgraph pkg["gpu_components"]
         direction TB
-        directory["directory<br/>identity and placement<br/>directory_data.py"]
-        fields["fields<br/>typed storage and transfers<br/>field_data.py"]
-        backing["backing<br/>virtual bytes and pages<br/>backing_data.py<br/>stdlib + libcuda only"]
-        graph["graph<br/>captured bindings<br/>graph_data.py, graph.cu"]
+        directory["directory<br/>who is where"]
+        fields["fields<br/>the bytes of each slot"]
+        backing["backing<br/>the pages under the rows<br/>stdlib + libcuda only"]
+        graphmod["graph<br/>kernel nodes bound to counts"]
         fields --> backing
-        fields -.->|retain, invalidate| graph
-        directory -.->|retain, invalidate| graph
+        fields -.->|retain, invalidate| graphmod
+        directory -.->|retain, invalidate| graphmod
     end
     pkg --> Warp["Warp: kernels, arrays, capture"]
     pkg --> CUDA["CUDA driver: VMM, graphs, device node updates"]
 ```
 
-Two conventions apply throughout.
+The directory never calls fields or backing, and fields never calls the directory. Newton is the only thing that knows about all of them, which is why a create inside the graph can only ever be placed or rejected: nothing in the directory can reach for pages.
 
-**Records are data and operations are functions.** Each `*_data.py` file holds passive records, `wp.struct`s and dataclasses with no methods. Each operation module holds free functions that take those records as arguments. A record's constructor neither allocates nor validates; the operation that produces the record does both.
+## Two conventions
 
-**Each relation has one writer and each task has one canonical operation.** Backing is the only writer of the byte ledger. The directory is the only writer of identity and placement. Graph operations are the only writers of capture retention. Where an older path to the same effect still exists, the API pages name it as a fallback.
+**Records are data, operations are functions.** Each `*_data.py` file holds plain records with no methods; each operation module holds functions that take them. Constructing a record allocates nothing; the operation that produces it does.
 
-Backing imports only the standard library and calls `libcuda.so.1` through `ctypes`. Importing the package does not initialize Warp or CUDA.
+**One writer per relation.** Backing is the only writer of the page ledger, the directory the only writer of identity and placement, graph operations the only writers of capture retention.

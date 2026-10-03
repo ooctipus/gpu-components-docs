@@ -2,6 +2,7 @@
 module.exports = {
   docs: [
     "index",
+    "alternatives",
     "vocabulary",
     "structure",
     { type: "category", label: "Concepts", collapsed: false, items: ["concepts/handles", "concepts/memory", "concepts/quantities", "concepts/lifecycle", "concepts/replay"] },

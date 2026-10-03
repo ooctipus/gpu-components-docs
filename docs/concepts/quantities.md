@@ -34,7 +34,7 @@ world index →  0        live       admissible   ready        mapped       rese
 <div class="gc-widget" data-widget="backing"></div>
 <div class="gc-fallback">
 
-![Granules are mapped one at a time and the ready marker follows each successful mapping](/img/backing.svg)
+![Pages are mapped one at a time and the ready marker follows each successful mapping](/img/backing.svg)
 
 </div>
 
