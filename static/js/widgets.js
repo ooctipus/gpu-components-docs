@@ -418,10 +418,10 @@
     function reset() { S.handles = []; S.nextHandle = 0; S.mapped = STORES.map(() => []); S.joined = false; log.add("reserve → two contiguous virtual ranges, nothing mapped. Virtual space is free; the budget counts physical handles only."); for (let i = 0; i < 4; i++) grow(0); for (let i = 0; i < 3; i++) grow(1); }
     let render = function () {
       figure.innerHTML = "";
-      const W = 860, x0 = 170, gw = 42; const s = svg("svg", { viewBox: `0 0 ${W} 300`, width: "100%" });
-      s.appendChild(svg("text", { x: 16, y: 18, "font-size": 12, "font-weight": "600", fill: C.text, text: "virtual: one contiguous reservation per storage = planned maximum worlds × Data per world; same 24 MiB ceiling for both" }));
+      const W = 860, x0 = 170, gw = 42; const s = svg("svg", { viewBox: `0 0 ${W} 320`, width: "100%" });
+      s.appendChild(svg("text", { x: 16, y: 18, "font-size": 12, "font-weight": "600", fill: C.text, text: "virtual: one contiguous reservation per storage = planned maximum worlds × Data per world. Width is bytes: both bars are 24 MiB; the same width holds 16× fewer G1 worlds." }));
       STORES.forEach((st, k) => {
-        const y = 36 + k * 64; const vbytes = st.slots * st.stride / 1048576;
+        const y = 36 + k * 76; const vbytes = st.slots * st.stride / 1048576;
         s.appendChild(svg("text", { x: 16, y: y + 10, "font-size": 11, fill: C.text, text: st.name }));
         s.appendChild(svg("text", { x: 16, y: y + 23, "font-size": 9, fill: C.muted, text: st.plan }));
         s.appendChild(svg("text", { x: 16, y: y + 35, "font-size": 9, fill: C.muted, text: `× ${(st.stride / 1024).toFixed(1)} KiB/world = ${vbytes.toFixed(0)} MiB` }));
@@ -431,9 +431,15 @@
           s.appendChild(svg("text", { x: x + (gw - 4) / 2, y: y + 19, "text-anchor": "middle", "font-size": 10, fill: m ? "white" : C.muted, text: m ? `#${m.id}` : `v${g}` }));
         }
         s.appendChild(svg("text", { x: x0 + st.granules * gw + 4, y: y + 19, "font-size": 9.5, fill: C.muted, text: `slot i at base + i × ${st.stride}` }));
+        // world-count ticks along the byte axis
+        [0.25, 0.5, 0.75, 1].forEach((f) => {
+          const tx = x0 + f * st.granules * gw - 2;
+          s.appendChild(svg("line", { x1: tx, y1: y + 30, x2: tx, y2: y + 36, stroke: "#9ca3af" }));
+          s.appendChild(svg("text", { x: tx, y: y + 46, "text-anchor": "end", "font-size": 8.5, fill: C.muted, text: `${Math.round(st.slots * f).toLocaleString()} worlds` }));
+        });
       });
       // physical pool
-      const py = 200;
+      const py = 220;
       s.appendChild(svg("text", { x: 16, y: py - 14, "font-size": 12, "font-weight": "600", fill: C.text, text: `physical memory: ${GRANULE} MiB granule handles from a pool, budget ${BUDGET} handles = ${BUDGET * GRANULE} MiB` }));
       for (let i = 0; i < BUDGET; i++) {
         const x = x0 + i * gw, h = S.handles[i];
@@ -441,13 +447,13 @@
         s.appendChild(svg("rect", { x, y: py, width: gw - 4, height: 30, rx: 4, fill, stroke: h ? "#1f2937" : "#cbd5e1", "stroke-dasharray": h ? "" : "3 3" }));
         s.appendChild(svg("text", { x: x + (gw - 4) / 2, y: py + 19, "text-anchor": "middle", "font-size": 10, fill: h && h.owner !== null ? "white" : C.muted, text: h ? `#${h.id}` : "free" }));
         if (h && h.owner !== null) {
-          const vy = 36 + h.owner * 64 + 30, vx = x0 + h.vslot * gw + (gw - 4) / 2;
+          const vy = 36 + h.owner * 76 + 30, vx = x0 + h.vslot * gw + (gw - 4) / 2;
           s.appendChild(svg("path", { d: `M${x + (gw - 4) / 2} ${py} C ${x + (gw - 4) / 2} ${py - 40}, ${vx} ${vy + 40}, ${vx} ${vy}`, fill: "none", stroke: STORES[h.owner].color, "stroke-width": 1.4, opacity: 0.7 }));
         }
       }
       s.appendChild(svg("text", { x: 16, y: py + 52, "font-size": 10, fill: C.muted, text: "white dashed: not yet created · yellow: spare, created but unmapped, still counted · colored: mapped into the storage of that color" }));
       if (S.joined) s.appendChild(svg("text", { x: W - 16, y: py + 52, "text-anchor": "end", "font-size": 11, fill: C.bad, text: "maintenance: joining readers…" }));
-      s.appendChild(svg("text", { x: 16, y: 290, "font-size": 10, fill: C.muted, text: "Same ceiling, 16× fewer G1 worlds. Handles are interchangeable across storages; virtual granules never move. Reserved 48 MiB > budget 32 MiB: reservation is not a promise of memory." }));
+      s.appendChild(svg("text", { x: 16, y: 310, "font-size": 10, fill: C.muted, text: "Same ceiling, 16× fewer G1 worlds. Handles are interchangeable across storages; virtual granules never move. Reserved 48 MiB > budget 32 MiB: reservation is not a promise of memory." }));
       figure.appendChild(s);
       stats.innerHTML = "";
       const vtotal = STORES.reduce((a, st) => a + st.granules * GRANULE, 0), mapped = S.handles.filter((h) => h.owner !== null).length;
