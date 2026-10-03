@@ -53,8 +53,8 @@
   /* ------------------------------------------------------------------ */
   function population(root) {
     const PROTOS = [
-      { name: "cartpole", cap: 16, ready: 8, bytes: 1, color: C.live, h: 34 },
-      { name: "G1 humanoid", cap: 8, ready: 4, bytes: 16, color: "#7c3aed", h: 34 },
+      { name: "cartpole", cap: 16, ready: 8, bytes: 1, color: C.live, h: 34, grow: 8 },
+      { name: "G1 humanoid", cap: 8, ready: 4, bytes: 16, color: "#7c3aed", h: 34, grow: 2 },
     ];
     const S = { gen: {}, nextId: 0, dense: [true, true], seq: 0, retired: [], rows: PROTOS.map((p) => Array(p.cap).fill(null)), ready: PROTOS.map((p) => p.ready) };
     const log = logPanel(); const figure = el("div", { class: "gc-figure" }); const stats = el("div", { class: "gc-stats" });
@@ -88,8 +88,8 @@
     }
     function grow(k) {
       const p = PROTOS[k]; if (S.ready[k] >= p.cap) { log.add(`${p.name}: reserved capacity reached.`, "bad"); return; }
-      const before = S.ready[k]; S.ready[k] = Math.min(p.cap, S.ready[k] + (k === 0 ? 8 : 2));
-      log.add(`map_backing (${p.name}) → slots [${before}, ${S.ready[k]}) backed, ${(S.ready[k] - before) * p.bytes} unit(s) of pages mapped; publish_ready after initialization. No reader join: nothing could address these slots yet.`, "good");
+      const before = S.ready[k]; S.ready[k] = Math.min(p.cap, S.ready[k] + p.grow);
+      log.add(`map_backing (${p.name}) → ${Math.ceil(((S.ready[k] - before) * p.bytes) / 8)} granule(s) mapped under slots [${before}, ${S.ready[k]}); the slots' virtual addresses were already fixed. publish_ready after initialization. No reader join.`, "good");
       render();
     }
     function lookupStale() {
@@ -99,24 +99,34 @@
     }
     function reset() {
       S.rows = PROTOS.map((p) => Array(p.cap).fill(null)); S.ready = PROTOS.map((p) => p.ready); S.gen = {}; S.nextId = 0; S.dense = [true, true]; S.seq = 0; S.retired = [];
-      log.add("allocate(slot_limits=(16, 8)) → two empty prototypes. Cartpole: 8 of 16 slots ready. G1: 4 of 8 slots ready."); render();
+      log.add("allocate(slot_limits=(16, 8)) → two contiguous virtual ranges. Cartpole: 1 granule mapped = 8 of 16 slots ready. G1: 8 granules mapped = 4 of 8 slots ready."); render();
     }
     function render() {
       figure.innerHTML = "";
-      const W = 720, x0 = 150, rowW = 34, UNITS_PER_GRANULE = 16;
-      const s = svg("svg", { viewBox: `0 0 ${W} 230`, width: "100%" });
-      s.appendChild(svg("text", { x: 16, y: 16, "font-size": 12, "font-weight": "600", fill: C.text, text: "Directory slots: positions in each prototype's virtual reservation (world indices)" }));
-      s.appendChild(svg("text", { x: 16, y: 30, "font-size": 10, fill: C.muted, text: "Virtual: every slot has a fixed address. Physical: only slots left of the red ready marker have mapped pages. Pale slots are reserved only." }));
+      const W = 720, x0 = 150, rowW = 34, UNITS_PER_GRANULE = 8;
+      const s = svg("svg", { viewBox: `0 0 ${W} 300`, width: "100%" });
+      s.appendChild(svg("text", { x: 16, y: 16, "font-size": 12, "font-weight": "600", fill: C.text, text: "Each prototype: virtual slots on top, physical granules underneath" }));
+      s.appendChild(svg("text", { x: 16, y: 30, "font-size": 10, fill: C.muted, text: "The top row is one contiguous virtual range; every slot keeps its address forever. The band below shows which granules of physical memory are mapped under it; blank means reserved only." }));
       PROTOS.forEach((p, k) => {
-        const y0 = 54 + k * 84, live = liveCount(k);
+        const y0 = 60 + k * 118, live = liveCount(k);
         const granules = Math.ceil((S.ready[k] * p.bytes) / UNITS_PER_GRANULE);
         s.appendChild(svg("text", { x: 16, y: y0 + 12, "font-size": 12, fill: C.text, "font-weight": "600", text: p.name }));
-        s.appendChild(svg("text", { x: 16, y: y0 + 26, "font-size": 9.5, fill: C.muted, text: `virtual: ${p.cap} slots reserved` }));
-        s.appendChild(svg("text", { x: 16, y: y0 + 38, "font-size": 9.5, fill: C.muted, text: `physical: ${granules} granule${granules === 1 ? "" : "s"} = ${S.ready[k] * p.bytes} units` }));
-        s.appendChild(svg("text", { x: 16, y: y0 + 50, "font-size": 9.5, fill: C.muted, text: `${p.bytes} unit${p.bytes > 1 ? "s" : ""} per world` }));
+        s.appendChild(svg("text", { x: 16, y: y0 + 26, "font-size": 9.5, fill: C.muted, text: `${p.bytes} unit${p.bytes > 1 ? "s" : ""} per world` }));
+        s.appendChild(svg("text", { x: 16, y: y0 + 38, "font-size": 9.5, fill: C.muted, text: `virtual: ${p.cap} slots, contiguous` }));
+        s.appendChild(svg("text", { x: 16, y: y0 + 72, "font-size": 9.5, fill: C.muted, text: `physical: ${granules} granule${granules === 1 ? "" : "s"} mapped` }));
+        s.appendChild(svg("text", { x: x0, y: y0 - 6, "font-size": 9.5, fill: C.muted, text: "virtual address →   base" }));
+        s.appendChild(svg("text", { x: x0 + p.cap * rowW - 4, y: y0 - 6, "text-anchor": "end", "font-size": 9.5, fill: C.muted, text: `base + ${p.cap} × stride` }));
+        // physical band: granules under the mapped prefix, in units of UNITS_PER_GRANULE
+        const unitW = rowW / p.bytes, gW = UNITS_PER_GRANULE * unitW, totalG = Math.ceil((p.cap * p.bytes) / UNITS_PER_GRANULE);
+        s.appendChild(svg("text", { x: x0, y: y0 + p.h + 46, "font-size": 9, fill: C.muted, text: "physical granules (pooled handles, 8 units each)" }));
+        for (let g = 0; g < totalG; g++) {
+          const gx = x0 + g * gW, mapped = g < granules;
+          s.appendChild(svg("rect", { x: gx, y: y0 + p.h + 50, width: Math.max(2, gW - 3), height: 16, rx: 3, fill: mapped ? "#93c5fd" : "none", stroke: mapped ? "#1f2937" : "#d1d5db", "stroke-dasharray": mapped ? "" : "3 3" }));
+          if (mapped && gW > 30) s.appendChild(svg("text", { x: gx + (gW - 3) / 2, y: y0 + p.h + 62, "text-anchor": "middle", "font-size": 8.5, fill: "#111827", text: `#${k * 40 + g}` }));
+        }
         s.appendChild(svg("rect", { x: x0, y: y0 - 6, width: Math.max(0, live * rowW - 4), height: 5, rx: 2, fill: p.color, opacity: 0.35 }));
-        s.appendChild(svg("line", { x1: x0 + S.ready[k] * rowW - 2, y1: y0 - 8, x2: x0 + S.ready[k] * rowW - 2, y2: y0 + p.h + 6, stroke: C.bad, "stroke-width": 2, "stroke-dasharray": "4 3" }));
-        s.appendChild(svg("text", { x: x0 + S.ready[k] * rowW + 2, y: y0 + p.h + 16, "font-size": 10, fill: C.bad, text: `ready ${S.ready[k]} (mapped)` }));
+        s.appendChild(svg("line", { x1: x0 + S.ready[k] * rowW - 2, y1: y0 - 8, x2: x0 + S.ready[k] * rowW - 2, y2: y0 + p.h + 68, stroke: C.bad, "stroke-width": 2, "stroke-dasharray": "4 3" }));
+        s.appendChild(svg("text", { x: x0 + S.ready[k] * rowW + 2, y: y0 + p.h + 30, "font-size": 10, fill: C.bad, text: `ready ${S.ready[k]}: slots with pages, published` }));
         for (let r = 0; r < p.cap; r++) {
           const x = x0 + r * rowW, h = S.rows[k][r];
           let fill = C.free, stroke = C.freeStroke;
@@ -144,7 +154,7 @@
       button("Grow cartpole backing", () => grow(0)), button("Grow G1 backing", () => grow(1)),
       button("Look up a stale handle", lookupStale), button("Reset", reset),
     ]));
-    root.appendChild(el("div", { class: "gc-hint", text: "Boxes are virtual slots, not physical pages. Click a live world to destroy it. Each box shows the world's identity and generation. One unit = one cartpole world's Data; a G1 world is 16 units; a granule is 16 units. Green: created this step. Grey: free and mapped. Pale: reserved, no physical pages. Orange outline: live but outside the prefix a count-driven kernel visits." }));
+    root.appendChild(el("div", { class: "gc-hint", text: "Top row: virtual slots, one box per world index, contiguous. Band: physical granules under the mapped prefix. Click a live world to destroy it. One unit = one cartpole world's Data; a G1 world is 16 units; a granule is 8 units, so a G1 world spans two granules and a granule holds eight cartpoles. Green: created this step. Grey: free and mapped. Pale: reserved, no physical pages. Orange outline: live but outside the prefix a count-driven kernel visits." }));
     root.appendChild(figure); root.appendChild(stats); root.appendChild(log.box);
     reset(); for (let i = 0; i < 6; i++) create(0); for (let i = 0; i < 3; i++) create(1);
     log.add("Six cartpoles and three G1s created while both certificates held: each prototype filled its lowest slots in order. Data bytes live = 6 + 48 = 54 units.");
