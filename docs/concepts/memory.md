@@ -18,7 +18,7 @@ A kernel launched over indices 0 to `live_count − 1` reads slots 0 to `live_co
 
 The rest of this page is about the second and third layers.
 
-**Virtual address space** is reserved once per `FieldStorage`, as one contiguous range of `capacity × row_stride` bytes rounded up to the driver granule. It never moves and never grows. Slot *i* of a field is always at `base + i × row_stride`, from the first allocation until close. This is what makes growth compatible with captured graphs: a kernel node captured with a pointer into the storage keeps a valid pointer as the population grows, because the pointer was into the reservation, not into whatever happened to be mapped. On current GPUs a process can reserve on the order of 2^47 bytes, so reserving the maximum `nworld` a prototype may ever reach costs nothing physical.
+**Virtual address space** is reserved once per `FieldStorage`, as one contiguous range of `capacity × row_stride` bytes rounded up to the driver granule, where `capacity` is the planned maximum number of worlds for that prototype. It never moves and never grows. Slot *i* of a field is always at `base + i × row_stride`, from the first allocation until close. This is what makes growth compatible with captured graphs: a kernel node captured with a pointer into the storage keeps a valid pointer as the population grows, because the pointer was into the reservation, not into whatever happened to be mapped. On current GPUs a process can reserve on the order of 2^47 bytes, so reserving for the planned maximum `nworld` costs nothing physical; what bounds the plan is discussed under "Why not reserve more".
 
 **Physical memory** is a pool of granule handles, 2 MiB each on current drivers, created with `cuMemCreate` and mapped into virtual granules with `cuMemMap`. Handles are discrete and interchangeable. A handle freed when the G1 storage shrinks can later back a cartpole granule. The physical pages behind one storage need not be contiguous and usually are not. The byte budget counts handles, mapped or spare, and nothing else.
 
@@ -51,7 +51,7 @@ The figure keeps the two layers apart. Grow a storage and a handle is drawn from
 | Mapping is per granule | Readiness rounds to granules; a 4096-slot cartpole storage at 16 bytes per slot is one granule and is entirely ready at once |
 | Handles are pooled | Oscillating populations reuse handles without touching the driver; `trim` is the only release |
 | Budget counts handles | A G1 storage at 284 bytes per slot consumes a granule every 7,384 slots; a cartpole storage every 131,072. The same budget holds about sixteen times fewer G1 worlds |
-| Virtual is cheap | Reserve for the maximum; there is no reason to size a reservation to the current population |
+| Virtual is cheap | Reserve for the planned maximum population, not the current one. The ceiling is set by directory metadata and per-batch scan cost, not by address space; see below |
 
 ## Why not reserve more
 
