@@ -103,15 +103,20 @@
     }
     function render() {
       figure.innerHTML = "";
-      const W = 720, x0 = 110, rowW = 36;
-      const s = svg("svg", { viewBox: `0 0 ${W} 190`, width: "100%" });
+      const W = 720, x0 = 150, rowW = 34, UNITS_PER_GRANULE = 16;
+      const s = svg("svg", { viewBox: `0 0 ${W} 230`, width: "100%" });
+      s.appendChild(svg("text", { x: 16, y: 16, "font-size": 12, "font-weight": "600", fill: C.text, text: "Directory slots: positions in each prototype's virtual reservation (world indices)" }));
+      s.appendChild(svg("text", { x: 16, y: 30, "font-size": 10, fill: C.muted, text: "Virtual: every slot has a fixed address. Physical: only slots left of the red ready marker have mapped pages. Pale slots are reserved only." }));
       PROTOS.forEach((p, k) => {
-        const y0 = 30 + k * 80, live = liveCount(k);
-        s.appendChild(svg("text", { x: 16, y: y0 + 22, "font-size": 12, fill: C.text, "font-weight": "600", text: p.name }));
-        s.appendChild(svg("text", { x: 16, y: y0 + 38, "font-size": 10, fill: C.muted, text: `${p.bytes} unit${p.bytes > 1 ? "s" : ""} / world` }));
+        const y0 = 54 + k * 84, live = liveCount(k);
+        const granules = Math.ceil((S.ready[k] * p.bytes) / UNITS_PER_GRANULE);
+        s.appendChild(svg("text", { x: 16, y: y0 + 12, "font-size": 12, fill: C.text, "font-weight": "600", text: p.name }));
+        s.appendChild(svg("text", { x: 16, y: y0 + 26, "font-size": 9.5, fill: C.muted, text: `virtual: ${p.cap} slots reserved` }));
+        s.appendChild(svg("text", { x: 16, y: y0 + 38, "font-size": 9.5, fill: C.muted, text: `physical: ${granules} granule${granules === 1 ? "" : "s"} = ${S.ready[k] * p.bytes} units` }));
+        s.appendChild(svg("text", { x: 16, y: y0 + 50, "font-size": 9.5, fill: C.muted, text: `${p.bytes} unit${p.bytes > 1 ? "s" : ""} per world` }));
         s.appendChild(svg("rect", { x: x0, y: y0 - 6, width: Math.max(0, live * rowW - 4), height: 5, rx: 2, fill: p.color, opacity: 0.35 }));
         s.appendChild(svg("line", { x1: x0 + S.ready[k] * rowW - 2, y1: y0 - 8, x2: x0 + S.ready[k] * rowW - 2, y2: y0 + p.h + 6, stroke: C.bad, "stroke-width": 2, "stroke-dasharray": "4 3" }));
-        s.appendChild(svg("text", { x: x0 + S.ready[k] * rowW + 2, y: y0 + p.h + 16, "font-size": 10, fill: C.bad, text: `ready ${S.ready[k]}` }));
+        s.appendChild(svg("text", { x: x0 + S.ready[k] * rowW + 2, y: y0 + p.h + 16, "font-size": 10, fill: C.bad, text: `ready ${S.ready[k]} (mapped)` }));
         for (let r = 0; r < p.cap; r++) {
           const x = x0 + r * rowW, h = S.rows[k][r];
           let fill = C.free, stroke = C.freeStroke;
@@ -121,8 +126,8 @@
           if (h) rect.appendChild(svg("title", { text: `${p.name} id ${h.id} gen ${h.gen}. Click to destroy.` }));
           s.appendChild(rect);
           if (h) {
-            s.appendChild(svg("text", { x: x + (rowW - 4) / 2, y: y0 + 14, "text-anchor": "middle", "font-size": 10, fill: "white", text: `${h.id}` }));
-            s.appendChild(svg("text", { x: x + (rowW - 4) / 2, y: y0 + 27, "text-anchor": "middle", "font-size": 9, fill: "white", text: `g${h.gen}` }));
+            s.appendChild(svg("text", { x: x + (rowW - 4) / 2, y: y0 + 14, "text-anchor": "middle", "font-size": 9.5, fill: "white", text: `id ${h.id}` }));
+            s.appendChild(svg("text", { x: x + (rowW - 4) / 2, y: y0 + 27, "text-anchor": "middle", "font-size": 8.5, fill: "white", text: `gen ${h.gen}` }));
           }
           s.appendChild(svg("text", { x: x + (rowW - 4) / 2, y: y0 + p.h + 16, "text-anchor": "middle", "font-size": 9, fill: C.muted, text: String(r) }));
         }
@@ -139,7 +144,7 @@
       button("Grow cartpole backing", () => grow(0)), button("Grow G1 backing", () => grow(1)),
       button("Look up a stale handle", lookupStale), button("Reset", reset),
     ]));
-    root.appendChild(el("div", { class: "gc-hint", text: "Click a live world to destroy it. One unit = one cartpole world's Data; a G1 world is 16 units. Green: created this step. Grey: free. Pale: reserved but not ready. Orange outline: live but outside the prefix a count-driven kernel visits." }));
+    root.appendChild(el("div", { class: "gc-hint", text: "Boxes are virtual slots, not physical pages. Click a live world to destroy it. Each box shows the world's identity and generation. One unit = one cartpole world's Data; a G1 world is 16 units; a granule is 16 units. Green: created this step. Grey: free and mapped. Pale: reserved, no physical pages. Orange outline: live but outside the prefix a count-driven kernel visits." }));
     root.appendChild(figure); root.appendChild(stats); root.appendChild(log.box);
     reset(); for (let i = 0; i < 6; i++) create(0); for (let i = 0; i < 3; i++) create(1);
     log.add("Six cartpoles and three G1s created while both certificates held: each prototype filled its lowest slots in order. Data bytes live = 6 + 48 = 54 units.");
