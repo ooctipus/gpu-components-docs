@@ -67,3 +67,5 @@
 .gc-ctrl .gc-slider { width: 260px; }
 .gc-row-dist { grid-template-columns: 50px 110px 140px 170px 80px 80px 1fr; }
 .gc-readout { font-family: var(--ifm-font-family-monospace); font-size: 0.78rem; font-weight: 600; min-width: 90px; }
+.gc-note { font-size: 0.8rem; margin-top: 6px; padding: 6px 8px; border-left: 3px solid var(--ifm-color-primary); background: var(--ifm-color-emphasis-0); }
+.gc-note-bad { border-left-color: #dc2626; }
