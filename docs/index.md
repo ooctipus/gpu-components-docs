@@ -14,7 +14,14 @@ Now cartpole number 2 falls over and its episode ends. Cartpole 5 ends a step la
 - When the new cartpole takes row 2, how does anything still holding a reference to the old cartpole 2 learn that it is gone?
 - If the loop later wants 9 cartpoles, where does the ninth row come from without reallocating the arrays and re-recording the GPU work?
 
+<div class="gc-widget" data-widget="population"></div>
+<div class="gc-fallback">
+
 ![Eight rows over four steps: two episodes end, one instance is created, nothing is reallocated](assets/population.svg)
+
+</div>
+
+The figure above is interactive on the documentation site: create instances, click rows to destroy them, compact, grow, and look up a stale handle. The log names the operation and the rule each action exercised.
 
 This package answers those three questions on the device. The rest of this document explains how, starting with the words it uses.
 
@@ -167,7 +174,12 @@ row index →  0        live       admissible   ready        mapped       reserv
 | live | directory | `publish`, `publish_compaction` |
 | execution count | consumer | any device int32 bound to a graph node |
 
+<div class="gc-widget" data-widget="backing"></div>
+<div class="gc-fallback">
+
 ![Granules are mapped one at a time and the ready marker follows each successful mapping](assets/backing.svg)
+
+</div>
 
 Mapping bytes does not make rows ready. Readiness does not make rows live. Liveness does not initialize them. Each transition is an explicit operation. This is what allows storage to grow while a captured graph is replaying.
 
@@ -188,7 +200,12 @@ stateDiagram-v2
     MOVING --> IDLE : publish_compaction()<br/>rewrite placement, keep handles
 ```
 
+<div class="gc-widget" data-widget="lifecycle"></div>
+<div class="gc-fallback">
+
 ![The batch moves through begin, validation, admit, initialization and publish](assets/lifecycle.svg)
+
+</div>
 
 Three rules make this safe under a captured graph.
 
@@ -219,7 +236,12 @@ sequenceDiagram
     K2->>K2: skipped
 ```
 
+<div class="gc-widget" data-widget="replay"></div>
+<div class="gc-fallback">
+
 ![One captured graph replayed five times with five different counts](assets/replay.svg)
+
+</div>
 
 On the bridge's microbenchmark the updater adds about 2 µs per replay, against 25 to 68 percent wasted work for power-of-two padding. The requirement is that every bound kernel is a Warp kernel with the known launch ABI. Library kernels such as cuBLAS cannot be resized this way, which is why serving systems pad and this package does not.
 

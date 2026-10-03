@@ -21,3 +21,7 @@ markdown_extensions:
           class: mermaid
           format: !!python/name:pymdownx.superfences.fence_code_format
   - pymdownx.highlight
+extra_javascript:
+  - js/widgets.js
+extra_css:
+  - css/widgets.css
