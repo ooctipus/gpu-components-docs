@@ -39,6 +39,8 @@ flowchart TB
 
 <div class="gc-widget" data-widget="memory"></div>
 
+The reservations in the figure follow one rule: planned maximum worlds times `Data` bytes per world. A full MuJoCo Warp `Data` row holds far more than `qpos` and `qvel`: body poses, contact records and constraint scratch bring a cartpole world to roughly 1.5 KiB and a G1 world to roughly 24 KiB. Giving both prototypes the same 24 MiB ceiling therefore plans for 16,384 cartpoles and 1,024 G1 worlds. The physical budget in the figure is 32 MiB, less than the 48 MiB reserved: a reservation is a ceiling, not a promise of memory.
+
 The figure keeps the two layers apart. Grow a storage and a handle is drawn from the pool, created if the pool has none and the budget allows, and mapped into the next virtual granule. Shrink one and its last handle returns to the spare pool, still counted until `trim` releases it. The virtual bars never change.
 
 ## What follows from the split
@@ -50,6 +52,16 @@ The figure keeps the two layers apart. Grow a storage and a handle is drawn from
 | Handles are pooled | Oscillating populations reuse handles without touching the driver; `trim` is the only release |
 | Budget counts handles | A G1 storage at 284 bytes per slot consumes a granule every 7,384 slots; a cartpole storage every 131,072. The same budget holds about sixteen times fewer G1 worlds |
 | Virtual is cheap | Reserve for the maximum; there is no reason to size a reservation to the current population |
+
+## Why not reserve more
+
+Reservation is cheap, so the ceiling could be much higher. Three things stop it from being unlimited, and none of them is the address space.
+
+- **Address space is finite.** A CUDA process has on the order of 128 TiB of user virtual addresses. PyTorch's allocator reserves 1.125 times device memory per segment and documents that over-reserving exhausts that space after a few hundred segments. Many prototypes times several storages each can reach it; a planned maximum does not.
+- **Directory metadata is physical and sized by capacity.** Each slot costs about 28 bytes of ordinary GPU memory and each identity about 24, before any world exists. A directory for a million slots and two million identities holds about 76 MB. The storage reservation is free; the directory that indexes it is not.
+- **Publication scans capacity.** `publish` and compaction rescan identity and slot capacity on every batch, so unused capacity has a per-step cost today. Slots, strides and launch dimensions are also int32, which caps one storage at about two billion slots.
+
+The rule that follows: reserve for the largest `nworld` the prototype will plausibly reach, size the directory to match knowing its cost, and let requests beyond that be rejected rather than grown. Growing past a reservation is a new storage, by design.
 
 ## What the package does not do
 

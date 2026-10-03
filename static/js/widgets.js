@@ -383,11 +383,14 @@
   /* ------------------------------------------------------------------ */
   function memory(root) {
     const GRANULE = 2; // MiB
+    // Sizing rule shown in the figure: reservation = planned maximum worlds × Data bytes per world.
+    // Full MJWarp Data per world (positions, velocities, body poses, contacts, constraint scratch):
+    // cartpole about 1.5 KiB, G1 about 24 KiB, a 16:1 ratio. Both prototypes are given the same 24 MiB ceiling.
     const STORES = [
-      { name: "cartpole storage", slots: 1048576, stride: 16, granules: 8, color: C.live },
-      { name: "G1 storage", slots: 65536, stride: 284, granules: 9, color: "#7c3aed" },
+      { name: "cartpole storage", slots: 16384, stride: 1536, granules: 12, color: C.live, plan: "planned max 16,384 worlds" },
+      { name: "G1 storage", slots: 1024, stride: 24576, granules: 12, color: "#7c3aed", plan: "planned max 1,024 worlds" },
     ];
-    const BUDGET = 12; // granule handles
+    const BUDGET = 16; // physical granule handles = 32 MiB, less than the 48 MiB reserved
     // physical handles: id -> {owner: storeIndex|null, vslot: granule index|null}; spare = owner null but allocated
     const S = { handles: [], nextHandle: 0, mapped: STORES.map(() => []) , joined: false };
     const log = logPanel(); const figure = el("div", { class: "gc-figure" }); const stats = el("div", { class: "gc-stats" });
@@ -415,18 +418,19 @@
     function reset() { S.handles = []; S.nextHandle = 0; S.mapped = STORES.map(() => []); S.joined = false; log.add("reserve → two contiguous virtual ranges, nothing mapped. Virtual space is free; the budget counts physical handles only."); for (let i = 0; i < 4; i++) grow(0); for (let i = 0; i < 3; i++) grow(1); }
     function render() {
       figure.innerHTML = "";
-      const W = 760, x0 = 150, gw = 56; const s = svg("svg", { viewBox: `0 0 ${W} 300`, width: "100%" });
-      s.appendChild(svg("text", { x: 16, y: 18, "font-size": 12, "font-weight": "600", fill: C.text, text: "virtual address space: one contiguous reservation per storage, fixed for its lifetime" }));
+      const W = 860, x0 = 170, gw = 42; const s = svg("svg", { viewBox: `0 0 ${W} 300`, width: "100%" });
+      s.appendChild(svg("text", { x: 16, y: 18, "font-size": 12, "font-weight": "600", fill: C.text, text: "virtual: one contiguous reservation per storage = planned maximum worlds × Data per world; same 24 MiB ceiling for both" }));
       STORES.forEach((st, k) => {
         const y = 36 + k * 64; const vbytes = st.slots * st.stride / 1048576;
-        s.appendChild(svg("text", { x: 16, y: y + 16, "font-size": 11, fill: C.text, text: st.name }));
-        s.appendChild(svg("text", { x: 16, y: y + 30, "font-size": 9.5, fill: C.muted, text: `${st.slots.toLocaleString()} slots × ${st.stride} B = ${vbytes.toFixed(0)} MiB` }));
+        s.appendChild(svg("text", { x: 16, y: y + 10, "font-size": 11, fill: C.text, text: st.name }));
+        s.appendChild(svg("text", { x: 16, y: y + 23, "font-size": 9, fill: C.muted, text: st.plan }));
+        s.appendChild(svg("text", { x: 16, y: y + 35, "font-size": 9, fill: C.muted, text: `× ${(st.stride / 1024).toFixed(1)} KiB/world = ${vbytes.toFixed(0)} MiB` }));
         for (let g = 0; g < st.granules; g++) {
           const x = x0 + g * gw, m = S.mapped[k][g];
           s.appendChild(svg("rect", { x, y, width: gw - 4, height: 30, rx: 4, fill: m ? st.color : "#fafafa", stroke: m ? "#1f2937" : "#cbd5e1", "stroke-dasharray": m ? "" : "3 3" }));
           s.appendChild(svg("text", { x: x + (gw - 4) / 2, y: y + 19, "text-anchor": "middle", "font-size": 10, fill: m ? "white" : C.muted, text: m ? `#${m.id}` : `v${g}` }));
         }
-        s.appendChild(svg("text", { x: x0 + st.granules * gw + 4, y: y + 19, "font-size": 10, fill: C.muted, text: `slot i at base + i × ${st.stride}` }));
+        s.appendChild(svg("text", { x: x0 + st.granules * gw + 4, y: y + 19, "font-size": 9.5, fill: C.muted, text: `slot i at base + i × ${st.stride}` }));
       });
       // physical pool
       const py = 200;
@@ -443,11 +447,11 @@
       }
       s.appendChild(svg("text", { x: 16, y: py + 52, "font-size": 10, fill: C.muted, text: "white dashed: not yet created · yellow: spare, created but unmapped, still counted · colored: mapped into the storage of that color" }));
       if (S.joined) s.appendChild(svg("text", { x: W - 16, y: py + 52, "text-anchor": "end", "font-size": 11, fill: C.bad, text: "maintenance: joining readers…" }));
-      s.appendChild(svg("text", { x: 16, y: 290, "font-size": 10, fill: C.muted, text: "Physical handles are interchangeable: a handle freed by the G1 storage can back a cartpole granule later. Virtual granules never move." }));
+      s.appendChild(svg("text", { x: 16, y: 290, "font-size": 10, fill: C.muted, text: "Same ceiling, 16× fewer G1 worlds. Handles are interchangeable across storages; virtual granules never move. Reserved 48 MiB > budget 32 MiB: reservation is not a promise of memory." }));
       figure.appendChild(s);
       stats.innerHTML = "";
       const vtotal = STORES.reduce((a, st) => a + st.granules * GRANULE, 0), mapped = S.handles.filter((h) => h.owner !== null).length;
-      [["virtual reserved", `${vtotal} MiB, costs nothing`], ["physical mapped", `${mapped * GRANULE} MiB`], ["spare (unmapped, retained)", `${spare().length * GRANULE} MiB`], ["budget in use", `${retained()} / ${BUDGET} handles`]].forEach(([k, v]) => stats.appendChild(stat(k, v)));
+      [["virtual reserved", `${vtotal} MiB (costs nothing)`], ["physical mapped", `${mapped * GRANULE} MiB`], ["spare (unmapped, retained)", `${spare().length * GRANULE} MiB`], ["budget in use", `${retained()} / ${BUDGET} handles`]].forEach(([k, v]) => stats.appendChild(stat(k, v)));
     }
     root.appendChild(el("div", { class: "gc-toolbar" }, [button("Grow cartpole", () => grow(0), true), button("Grow G1", () => grow(1), true), button("Shrink cartpole (joined)", () => shrink(0)), button("Shrink G1 (joined)", () => shrink(1)), button("trim spare handles", trim), button("Reset", reset)]));
     root.appendChild(el("div", { class: "gc-hint", text: "Top: contiguous virtual ranges, one per storage, sized for the maximum population. Bottom: the pool of physical granule handles the budget counts. Curves show which handle backs which virtual granule." }));
