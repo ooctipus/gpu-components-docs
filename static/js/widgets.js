@@ -481,11 +481,17 @@
       { name: "cartpole", bytes: 1, slots: 192, color: C.live },
       { name: "G1", bytes: 16, slots: 24, color: "#7c3aed" },
     ];
-    const S = { budget: 128, desired: [48, 4], ending: 0.3, live: [48, 4], seq: 0, lastBatch: null };
+    const S = { budget: 128, share: 0.5, ending: 0.3, live: [48, 4], seq: 0, lastBatch: null };
     const log = logPanel(); const figure = el("div", { class: "gc-figure" }); const stats = el("div", { class: "gc-stats" }); const batchBox = el("div", { class: "gc-table" });
     const used = () => S.live[0] * P[0].bytes + S.live[1] * P[1].bytes;
-    const targets = () => [Math.min(P[0].slots, S.desired[0]), Math.min(P[1].slots, S.desired[1])];
-    const desiredUnits = () => S.desired[0] * P[0].bytes + S.desired[1] * P[1].bytes;
+    // the budget is the total; the split decides how much of it is G1
+    const targets = () => {
+      const g1 = Math.min(P[1].slots, Math.floor((S.budget * S.share) / P[1].bytes));
+      const cart = Math.min(P[0].slots, S.budget - g1 * P[1].bytes);
+      return [cart, g1];
+    };
+    const desiredUnits = () => { const [c, g] = targets(); return c * P[0].bytes + g * P[1].bytes; };
+    const splitText = () => { const [c, g] = targets(); return `${c} cartpole + ${g} G1 worlds`; };
     const sl = (label, min, max, step, val, oninput, fmt) => {
       const i = el("input", { type: "range", min, max, step, value: val, class: "gc-slider" });
       const out = el("span", { class: "gc-readout", text: (fmt || String)(val) });
@@ -545,8 +551,7 @@
       if (w1 > 60) s.appendChild(svg("text", { x: x0 + w0 + 8, y: 46, "font-size": 11, fill: "white", text: `${S.live[1]} G1 = ${S.live[1] * P[1].bytes}` }));
       const bx = x0 + S.budget * unit; s.appendChild(svg("line", { x1: bx, y1: 22, x2: bx, y2: 60, stroke: C.bad, "stroke-width": 2 })); s.appendChild(svg("text", { x: bx, y: 72, "text-anchor": "middle", "font-size": 10, fill: C.bad, text: "budget" }));
       // target bar
-      const over = desiredUnits() - S.budget;
-      s.appendChild(svg("text", { x: x0, y: 96, "font-size": 12, fill: over > 0 ? C.bad : C.text, "font-weight": "600", text: `desired: ${S.desired[0]} cartpole + ${S.desired[1]} G1 = ${desiredUnits()} units` + (over > 0 ? ` — exceeds the budget by ${over}; resets will reject the excess` : "") }));
+      s.appendChild(svg("text", { x: x0, y: 96, "font-size": 12, fill: C.text, "font-weight": "600", text: `target that fills the budget: ${splitText()} = ${desiredUnits()} units` + (desiredUnits() < S.budget ? ` (${S.budget - desiredUnits()} units unused: slot limits)` : "") }));
       s.appendChild(svg("rect", { x: x0, y: 106, width: barW, height: 16, rx: 4, fill: C.free, stroke: C.freeStroke }));
       s.appendChild(svg("rect", { x: x0, y: 106, width: tgt[0] * P[0].bytes * unit, height: 16, rx: 4, fill: P[0].color, opacity: 0.5 }));
       s.appendChild(svg("rect", { x: x0 + tgt[0] * P[0].bytes * unit, y: 106, width: tgt[1] * P[1].bytes * unit, height: 16, fill: P[1].color, opacity: 0.5 }));
@@ -563,14 +568,13 @@
         batchBox.appendChild(r);
       }
     }
-    const [l1, s1_i, s1_o] = sl("memory budget (units; 1 cartpole = 1, 1 G1 = 16)", 16, 256, 8, S.budget, (e) => { S.budget = +e.target.value; render(); }, (v) => `${v} units`);
-    const [l2, s2_i, s2_o] = sl("desired cartpole worlds", 0, P[0].slots, 1, S.desired[0], (e) => { S.desired[0] = +e.target.value; render(); }, (v) => `${v} worlds = ${v} units`);
-    const [l4, s4_i, s4_o] = sl("desired G1 worlds", 0, P[1].slots, 1, S.desired[1], (e) => { S.desired[1] = +e.target.value; render(); }, (v) => `${v} worlds = ${v * 16} units`);
+    const [l2, s2_i, s2_o] = sl("split of the budget: all cartpole ← → all G1", 0, 1, 0.05, S.share, (e) => { S.share = +e.target.value; render(); }, () => splitText());
+    const [l1, s1_i, s1_o] = sl("memory budget (units; 1 cartpole = 1, 1 G1 = 16)", 16, 256, 8, S.budget, (e) => { S.budget = +e.target.value; s2_o.textContent = splitText(); render(); }, (v) => `${v} units`);
     const [l3, s3_i, s3_o] = sl("episodes ending per reset", 0, 1, 0.05, S.ending, (e) => { S.ending = +e.target.value; render(); }, (v) => `${Math.round(v * 100)}%`);
-    root.appendChild(el("div", { class: "gc-toolbar gc-toolbar-col" }, [el("div", { class: "gc-ctrl" }, [l1, s1_i, s1_o]), el("div", { class: "gc-ctrl" }, [l2, s2_i, s2_o]), el("div", { class: "gc-ctrl" }, [l4, s4_i, s4_o]), el("div", { class: "gc-ctrl" }, [l3, s3_i, s3_o]), button("Reset (run one batch)", reset, true), button("Start over", () => { S.live = [48, 4]; S.seq = 0; S.lastBatch = null; log.add("48 cartpoles and 4 G1s live, 112 units in use."); render(); })]));
-    root.appendChild(el("div", { class: "gc-hint", text: "Set a budget and the desired number of worlds of each prototype, then press Reset. Each reset is one directory batch: ended worlds are REPLACEd into the prototype the target needs, or DESTROYed; CREATEs fill the remainder while the budget and the slot limits allow. The two kernel counts the graph follows update with the live sets." }));
+    root.appendChild(el("div", { class: "gc-toolbar gc-toolbar-col" }, [el("div", { class: "gc-ctrl" }, [l1, s1_i, s1_o]), el("div", { class: "gc-ctrl" }, [l2, s2_i, s2_o]), el("div", { class: "gc-ctrl" }, [l3, s3_i, s3_o]), button("Reset (run one batch)", reset, true), button("Start over", () => { S.live = [48, 4]; S.seq = 0; S.lastBatch = null; log.add("48 cartpoles and 4 G1s live, 112 units in use."); render(); })]));
+    root.appendChild(el("div", { class: "gc-hint", text: "Set a budget and how it is split between the two prototypes, then press Reset. Each reset is one directory batch: ended worlds are REPLACEd into the prototype the target needs, or DESTROYed; CREATEs fill the remainder while the budget and the slot limits allow. The two kernel counts the graph follows update with the live sets." }));
     root.appendChild(figure); root.appendChild(stats); root.appendChild(batchBox); root.appendChild(log.box);
-    log.add("48 cartpoles and 4 G1s live, 112 units in use. Change the desired counts or lower the budget, then Reset."); render();
+    log.add("48 cartpoles and 4 G1s live, 112 units in use. Move the split or lower the budget, then Reset."); render();
   }
 
   const widgets = { population, lifecycle, replay, backing, memory, distribution };

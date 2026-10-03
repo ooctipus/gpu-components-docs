@@ -33,7 +33,7 @@ Episodes end at different times, replacements arrive, and the training loop late
 
 ## Resets under a memory budget
 
-Choose a memory budget and the desired number of worlds of each prototype, then run resets. Each reset is one directory batch; the figure shows which worlds are replaced, which are destroyed, which are created, and what the budget or the slot limits reject.
+Choose a memory budget and how to split it between the two prototypes, then run resets. Each reset is one directory batch; the figure shows which worlds are replaced, which are destroyed, which are created, and what the budget or the slot limits reject.
 
 <div class="gc-widget" data-widget="distribution"></div>
 
