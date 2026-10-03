@@ -61,3 +61,8 @@
 .gc-good { color: #15803d; font-weight: 600; }
 .gc-muted { color: var(--ifm-color-emphasis-600); font-size: 0.76rem; }
 .gc-fallback { display: none; }
+
+.gc-toolbar-col { flex-direction: column; align-items: flex-start; }
+.gc-ctrl { display: flex; gap: 10px; align-items: center; }
+.gc-ctrl .gc-slider { width: 260px; }
+.gc-row-dist { grid-template-columns: 50px 110px 140px 170px 80px 80px 1fr; }

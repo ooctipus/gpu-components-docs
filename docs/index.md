@@ -31,6 +31,12 @@ Episodes end at different times, replacements arrive, and the training loop late
 
 </div>
 
+## Resets under a memory budget
+
+Choose a budget and a desired mix of prototypes, then run resets. Each reset is one directory batch; the figure shows which worlds are replaced, which are destroyed, which are created, and what the budget or the slot limits reject.
+
+<div class="gc-widget" data-widget="distribution"></div>
+
 ## Where to start
 
 - [Vocabulary](vocabulary.md): the terms, in Newton and MuJoCo Warp notation.

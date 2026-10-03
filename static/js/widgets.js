@@ -456,7 +456,103 @@
     reset();
   }
 
-  const widgets = { population, lifecycle, replay, backing, memory };
+  /* ------------------------------------------------------------------ */
+  /* 6. Distribution: a memory budget, a target mix, and reset batches    */
+  /* ------------------------------------------------------------------ */
+  function distribution(root) {
+    const P = [
+      { name: "cartpole", bytes: 1, slots: 192, color: C.live },
+      { name: "G1", bytes: 16, slots: 24, color: "#7c3aed" },
+    ];
+    const S = { budget: 128, share: 0.5, ending: 0.3, live: [48, 4], seq: 0, lastBatch: null, nextId: 0, gens: 0 };
+    const log = logPanel(); const figure = el("div", { class: "gc-figure" }); const stats = el("div", { class: "gc-stats" }); const batchBox = el("div", { class: "gc-table" });
+    const used = () => S.live[0] * P[0].bytes + S.live[1] * P[1].bytes;
+    const targets = () => {
+      const g1 = Math.min(P[1].slots, Math.floor((S.budget * S.share) / P[1].bytes));
+      const cart = Math.min(P[0].slots, Math.max(0, S.budget - g1 * P[1].bytes));
+      return [cart, g1];
+    };
+    const sl = (label, min, max, step, val, oninput) => { const i = el("input", { type: "range", min, max, step, value: val, class: "gc-slider" }); i.addEventListener("input", oninput); return [el("label", { class: "gc-label", text: label }), i]; };
+    function reset() {
+      S.seq += 1;
+      const tgt = targets();
+      // 1. episodes end
+      const ended = S.live.map((n) => Math.round(n * S.ending));
+      const batch = { seq: S.seq, ended, destroy: [0, 0], replace: [[0, 0], [0, 0]], create: [0, 0], rejectedBudget: [0, 0], rejectedSlots: [0, 0] };
+      let live = S.live.slice();
+      let mem = used();
+      // ended worlds are freed first (destroy), their memory returns
+      for (let k = 0; k < 2; k++) { live[k] -= ended[k]; mem -= ended[k] * P[k].bytes; }
+      // 2. fill toward target: prefer REPLACE of an ended world (same identity) when the destination prototype needs worlds
+      let pool = ended.slice(); // identities available for REPLACE, by origin prototype
+      const need = [Math.max(0, tgt[0] - live[0]), Math.max(0, tgt[1] - live[1])];
+      // replacements: same-prototype first, then cross-prototype
+      for (const [from, to] of [[0, 0], [1, 1], [0, 1], [1, 0]]) {
+        while (pool[from] > 0 && need[to] > 0) {
+          if (live[to] >= P[to].slots) { batch.rejectedSlots[to] += 1; pool[from] -= 1; batch.destroy[from] += 1; continue; }
+          if (mem + P[to].bytes > S.budget) { batch.rejectedBudget[to] += 1; pool[from] -= 1; batch.destroy[from] += 1; continue; }
+          pool[from] -= 1; need[to] -= 1; live[to] += 1; mem += P[to].bytes; batch.replace[from][to] += 1;
+        }
+      }
+      // identities not replaced are destroyed
+      for (let k = 0; k < 2; k++) { batch.destroy[k] += pool[k]; pool[k] = 0; }
+      // 3. creates for remaining need
+      for (const to of [1, 0]) {
+        while (need[to] > 0) {
+          if (live[to] >= P[to].slots) { batch.rejectedSlots[to] += 1; need[to] -= 1; continue; }
+          if (mem + P[to].bytes > S.budget) { batch.rejectedBudget[to] += 1; need[to] -= 1; continue; }
+          need[to] -= 1; live[to] += 1; mem += P[to].bytes; batch.create[to] += 1;
+        }
+      }
+      S.live = live; S.lastBatch = batch;
+      const rep = batch.replace;
+      log.add(`reset → batch ${S.seq}: ended ${ended[0]} cartpole / ${ended[1]} G1. REPLACE ${rep[0][0]} cartpole→cartpole, ${rep[1][1]} G1→G1, ${rep[0][1]} cartpole→G1, ${rep[1][0]} G1→cartpole. CREATE ${batch.create[0]} cartpole / ${batch.create[1]} G1. DESTROY ${batch.destroy[0]} / ${batch.destroy[1]}.` +
+        ((batch.rejectedBudget[0] + batch.rejectedBudget[1]) ? ` ${batch.rejectedBudget[0] + batch.rejectedBudget[1]} request(s) rejected: budget.` : "") +
+        ((batch.rejectedSlots[0] + batch.rejectedSlots[1]) ? ` ${batch.rejectedSlots[0] + batch.rejectedSlots[1]} rejected: NO_SLOTS, grow that prototype's admissible prefix.` : ""),
+        (batch.rejectedBudget[0] + batch.rejectedBudget[1] + batch.rejectedSlots[0] + batch.rejectedSlots[1]) ? "bad" : "good");
+      render();
+    }
+    function render() {
+      figure.innerHTML = ""; const W = 760; const s = svg("svg", { viewBox: `0 0 ${W} 150`, width: "100%" });
+      const x0 = 24, barW = W - 48, unit = barW / Math.max(S.budget, used());
+      const tgt = targets();
+      // memory bar
+      s.appendChild(svg("text", { x: x0, y: 18, "font-size": 12, fill: C.text, "font-weight": "600", text: `memory in use: ${used()} of ${S.budget} units` }));
+      s.appendChild(svg("rect", { x: x0, y: 28, width: barW, height: 26, rx: 5, fill: C.free, stroke: C.freeStroke }));
+      const w0 = S.live[0] * P[0].bytes * unit, w1 = S.live[1] * P[1].bytes * unit;
+      s.appendChild(svg("rect", { x: x0, y: 28, width: w0, height: 26, rx: 5, fill: P[0].color }));
+      s.appendChild(svg("rect", { x: x0 + w0, y: 28, width: w1, height: 26, fill: P[1].color }));
+      if (w0 > 60) s.appendChild(svg("text", { x: x0 + 8, y: 46, "font-size": 11, fill: "white", text: `${S.live[0]} cartpole = ${S.live[0] * P[0].bytes}` }));
+      if (w1 > 60) s.appendChild(svg("text", { x: x0 + w0 + 8, y: 46, "font-size": 11, fill: "white", text: `${S.live[1]} G1 = ${S.live[1] * P[1].bytes}` }));
+      const bx = x0 + S.budget * unit; s.appendChild(svg("line", { x1: bx, y1: 22, x2: bx, y2: 60, stroke: C.bad, "stroke-width": 2 })); s.appendChild(svg("text", { x: bx, y: 72, "text-anchor": "middle", "font-size": 10, fill: C.bad, text: "budget" }));
+      // target bar
+      s.appendChild(svg("text", { x: x0, y: 96, "font-size": 12, fill: C.text, "font-weight": "600", text: `target after resets: ${tgt[0]} cartpole + ${tgt[1]} G1 = ${tgt[0] * P[0].bytes + tgt[1] * P[1].bytes} units (G1 share of memory ${Math.round(S.share * 100)}%)` }));
+      s.appendChild(svg("rect", { x: x0, y: 106, width: barW, height: 16, rx: 4, fill: C.free, stroke: C.freeStroke }));
+      s.appendChild(svg("rect", { x: x0, y: 106, width: tgt[0] * P[0].bytes * unit, height: 16, rx: 4, fill: P[0].color, opacity: 0.5 }));
+      s.appendChild(svg("rect", { x: x0 + tgt[0] * P[0].bytes * unit, y: 106, width: tgt[1] * P[1].bytes * unit, height: 16, fill: P[1].color, opacity: 0.5 }));
+      s.appendChild(svg("text", { x: x0, y: 142, "font-size": 10, fill: C.muted, text: `slot limits: ${P[0].slots} cartpole, ${P[1].slots} G1. A reset ends ${Math.round(S.ending * 100)}% of episodes; ended worlds are replaced or destroyed, then creates fill toward the target within the budget.` }));
+      figure.appendChild(s);
+      stats.innerHTML = "";
+      [["nworld cartpole (kernel count)", S.live[0]], ["nworld G1 (kernel count)", S.live[1]], ["memory used", `${used()} / ${S.budget}`], ["over budget", used() > S.budget ? `${used() - S.budget} units: only destroys until under` : "no"]].forEach(([k, v]) => stats.appendChild(stat(k, v)));
+      stats.lastChild.classList.toggle("gc-stat-bad", used() > S.budget);
+      batchBox.innerHTML = "";
+      if (S.lastBatch) {
+        const b = S.lastBatch; const head = el("div", { class: "gc-row gc-row-head gc-row-dist" }); ["batch", "episodes ended", "REPLACE same proto", "REPLACE cross proto", "CREATE", "DESTROY", "rejected"].forEach((h) => head.appendChild(el("div", { text: h }))); batchBox.appendChild(head);
+        const r = el("div", { class: "gc-row gc-row-dist" });
+        [String(b.seq), `${b.ended[0]} / ${b.ended[1]}`, `${b.replace[0][0]} / ${b.replace[1][1]}`, `${b.replace[0][1]} cart→G1, ${b.replace[1][0]} G1→cart`, `${b.create[0]} / ${b.create[1]}`, `${b.destroy[0]} / ${b.destroy[1]}`, `${b.rejectedBudget[0] + b.rejectedBudget[1]} budget, ${b.rejectedSlots[0] + b.rejectedSlots[1]} slots`].forEach((v, i) => { const d = el("div", { text: v }); if (i === 6 && v !== "0 budget, 0 slots") d.classList.add("gc-bad"); r.appendChild(d); });
+        batchBox.appendChild(r);
+      }
+    }
+    const [l1, s1] = sl("memory budget (units; 1 cartpole = 1, 1 G1 = 16)", 16, 256, 8, S.budget, (e) => { S.budget = +e.target.value; render(); });
+    const [l2, s2] = sl("desired G1 share of memory", 0, 1, 0.05, S.share, (e) => { S.share = +e.target.value; render(); });
+    const [l3, s3] = sl("episodes ending per reset", 0, 1, 0.05, S.ending, (e) => { S.ending = +e.target.value; render(); });
+    root.appendChild(el("div", { class: "gc-toolbar gc-toolbar-col" }, [el("div", { class: "gc-ctrl" }, [l1, s1]), el("div", { class: "gc-ctrl" }, [l2, s2]), el("div", { class: "gc-ctrl" }, [l3, s3]), button("Reset (run one batch)", reset, true), button("Start over", () => { S.live = [48, 4]; S.seq = 0; S.lastBatch = null; log.add("48 cartpoles and 4 G1s live, 112 units in use."); render(); })]));
+    root.appendChild(el("div", { class: "gc-hint", text: "Set a budget and a desired mix, then press Reset. Each reset is one directory batch: ended worlds are REPLACEd into the prototype the target needs, or DESTROYed; CREATEs fill the remainder while the budget and the slot limits allow. The two kernel counts the graph follows update with the live sets." }));
+    root.appendChild(figure); root.appendChild(stats); root.appendChild(batchBox); root.appendChild(log.box);
+    log.add("48 cartpoles and 4 G1s live, 112 units in use. Lower the budget below use, or move the G1 share, then Reset."); render();
+  }
+
+  const widgets = { population, lifecycle, replay, backing, memory, distribution };
   function init() {
     document.querySelectorAll(".gc-widget").forEach((root) => {
       if (root.dataset.ready) return;
