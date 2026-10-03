@@ -1,7 +1,7 @@
 ---
 id: lifecycle
 title: The lifecycle transaction
-sidebar_position: 3
+sidebar_position: 4
 ---
 
 # The lifecycle transaction

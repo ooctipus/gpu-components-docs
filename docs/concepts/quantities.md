@@ -1,7 +1,7 @@
 ---
 id: quantities
 title: Seven distinct quantities
-sidebar_position: 2
+sidebar_position: 3
 ---
 
 # Seven distinct quantities
@@ -23,7 +23,7 @@ world index →  0        live       admissible   ready        mapped       rese
 
 | Quantity | Module | Written by | In Newton |
 |---|---|---|---|
-| reserved | backing | `reserve` | the maximum `nworld` a prototype may ever reach |
+| reserved | backing | `reserve` | the maximum `nworld` a prototype may ever reach; see [virtual and physical memory](memory.md) |
 | mapped | backing | `map`, `unmap` | pages behind the worlds in use |
 | ready | fields | `publish_ready`, `resize_backing` | `ready_count`, the source for contact and CCD capacities |
 | protected | consumer | a device int32 that the storage borrows | the live world count |

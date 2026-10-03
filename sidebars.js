@@ -4,7 +4,7 @@ module.exports = {
     "index",
     "vocabulary",
     "structure",
-    { type: "category", label: "Concepts", collapsed: false, items: ["concepts/handles", "concepts/quantities", "concepts/lifecycle", "concepts/replay"] },
+    { type: "category", label: "Concepts", collapsed: false, items: ["concepts/handles", "concepts/memory", "concepts/quantities", "concepts/lifecycle", "concepts/replay"] },
     "quickstart",
     "tutorial",
     { type: "category", label: "API", collapsed: false, items: ["api/directory", "api/fields", "api/backing", "api/graph"] },

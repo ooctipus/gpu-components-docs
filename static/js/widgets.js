@@ -379,7 +379,84 @@
     reset();
   }
 
-  const widgets = { population, lifecycle, replay, backing };
+  /* ------------------------------------------------------------------ */
+  /* 5. Memory: contiguous virtual reservations over a pool of granules   */
+  /* ------------------------------------------------------------------ */
+  function memory(root) {
+    const GRANULE = 2; // MiB
+    const STORES = [
+      { name: "cartpole storage", slots: 1048576, stride: 16, granules: 8, color: C.live },
+      { name: "G1 storage", slots: 65536, stride: 284, granules: 9, color: "#7c3aed" },
+    ];
+    const BUDGET = 12; // granule handles
+    // physical handles: id -> {owner: storeIndex|null, vslot: granule index|null}; spare = owner null but allocated
+    const S = { handles: [], nextHandle: 0, mapped: STORES.map(() => []) , joined: false };
+    const log = logPanel(); const figure = el("div", { class: "gc-figure" }); const stats = el("div", { class: "gc-stats" });
+    const retained = () => S.handles.length;
+    const spare = () => S.handles.filter((h) => h.owner === null);
+    function acquire() { const sp = spare(); if (sp.length) return sp[0]; if (retained() >= BUDGET) return null; const h = { id: S.nextHandle++, owner: null, vslot: null }; S.handles.push(h); return h; }
+    function grow(k) {
+      const st = STORES[k]; const next = S.mapped[k].length;
+      if (next >= st.granules) { log.add(`${st.name}: every virtual granule is already mapped.`, "bad"); return; }
+      const h = acquire();
+      if (!h) { log.add(`map (${st.name}) → MemoryError before any driver call: ${retained()} handles retained, budget ${BUDGET}. Nothing changed.`, "bad"); render(); return; }
+      const reused = S.handles.includes(h) && h.id < S.nextHandle - 1 && spare().includes(h);
+      h.owner = k; h.vslot = next; S.mapped[k].push(h);
+      log.add(`map (${st.name}) → virtual granule ${next} at base + ${next * GRANULE} MiB ← physical handle #${h.id}${reused ? " (reused from the spare pool)" : " (cuMemCreate)"}. Virtual address of every slot unchanged. No reader join: never-mapped range.`, "good");
+      render();
+    }
+    function shrink(k) {
+      const st = STORES[k]; if (!S.mapped[k].length) { log.add(`${st.name}: nothing mapped.`, "bad"); return; }
+      S.joined = true; render();
+      log.add(`backing.maintenance (${st.name}): joining every named stream before cuMemUnmap…`);
+      setTimeout(() => { const h = S.mapped[k].pop(); h.owner = null; h.vslot = null; S.joined = false;
+        log.add(`unmap (${st.name}) → virtual granule ${S.mapped[k].length} unmapped; handle #${h.id} returns to the spare pool, still counted against the budget until trim. The virtual range stays reserved; pointers stay valid.`, "good"); render(); }, 800);
+    }
+    function trim() { const sp = spare(); if (!sp.length) { log.add("trim → no spare handles to release.", "bad"); return; } S.handles = S.handles.filter((h) => h.owner !== null); log.add(`trim → cuMemRelease on ${sp.length} spare handle(s); budget use drops to ${retained()}.`, "good"); render(); }
+    function reset() { S.handles = []; S.nextHandle = 0; S.mapped = STORES.map(() => []); S.joined = false; log.add("reserve → two contiguous virtual ranges, nothing mapped. Virtual space is free; the budget counts physical handles only."); for (let i = 0; i < 4; i++) grow(0); for (let i = 0; i < 3; i++) grow(1); }
+    function render() {
+      figure.innerHTML = "";
+      const W = 760, x0 = 150, gw = 56; const s = svg("svg", { viewBox: `0 0 ${W} 300`, width: "100%" });
+      s.appendChild(svg("text", { x: 16, y: 18, "font-size": 12, "font-weight": "600", fill: C.text, text: "virtual address space: one contiguous reservation per storage, fixed for its lifetime" }));
+      STORES.forEach((st, k) => {
+        const y = 36 + k * 64; const vbytes = st.slots * st.stride / 1048576;
+        s.appendChild(svg("text", { x: 16, y: y + 16, "font-size": 11, fill: C.text, text: st.name }));
+        s.appendChild(svg("text", { x: 16, y: y + 30, "font-size": 9.5, fill: C.muted, text: `${st.slots.toLocaleString()} slots × ${st.stride} B = ${vbytes.toFixed(0)} MiB` }));
+        for (let g = 0; g < st.granules; g++) {
+          const x = x0 + g * gw, m = S.mapped[k][g];
+          s.appendChild(svg("rect", { x, y, width: gw - 4, height: 30, rx: 4, fill: m ? st.color : "#fafafa", stroke: m ? "#1f2937" : "#cbd5e1", "stroke-dasharray": m ? "" : "3 3" }));
+          s.appendChild(svg("text", { x: x + (gw - 4) / 2, y: y + 19, "text-anchor": "middle", "font-size": 10, fill: m ? "white" : C.muted, text: m ? `#${m.id}` : `v${g}` }));
+        }
+        s.appendChild(svg("text", { x: x0 + st.granules * gw + 4, y: y + 19, "font-size": 10, fill: C.muted, text: `slot i at base + i × ${st.stride}` }));
+      });
+      // physical pool
+      const py = 200;
+      s.appendChild(svg("text", { x: 16, y: py - 14, "font-size": 12, "font-weight": "600", fill: C.text, text: `physical memory: ${GRANULE} MiB granule handles from a pool, budget ${BUDGET} handles = ${BUDGET * GRANULE} MiB` }));
+      for (let i = 0; i < BUDGET; i++) {
+        const x = x0 + i * gw, h = S.handles[i];
+        const fill = !h ? "#ffffff" : h.owner === null ? "#fde68a" : STORES[h.owner].color;
+        s.appendChild(svg("rect", { x, y: py, width: gw - 4, height: 30, rx: 4, fill, stroke: h ? "#1f2937" : "#cbd5e1", "stroke-dasharray": h ? "" : "3 3" }));
+        s.appendChild(svg("text", { x: x + (gw - 4) / 2, y: py + 19, "text-anchor": "middle", "font-size": 10, fill: h && h.owner !== null ? "white" : C.muted, text: h ? `#${h.id}` : "free" }));
+        if (h && h.owner !== null) {
+          const vy = 36 + h.owner * 64 + 30, vx = x0 + h.vslot * gw + (gw - 4) / 2;
+          s.appendChild(svg("path", { d: `M${x + (gw - 4) / 2} ${py} C ${x + (gw - 4) / 2} ${py - 40}, ${vx} ${vy + 40}, ${vx} ${vy}`, fill: "none", stroke: STORES[h.owner].color, "stroke-width": 1.4, opacity: 0.7 }));
+        }
+      }
+      s.appendChild(svg("text", { x: 16, y: py + 52, "font-size": 10, fill: C.muted, text: "white dashed: not yet created · yellow: spare, created but unmapped, still counted · colored: mapped into the storage of that color" }));
+      if (S.joined) s.appendChild(svg("text", { x: W - 16, y: py + 52, "text-anchor": "end", "font-size": 11, fill: C.bad, text: "maintenance: joining readers…" }));
+      s.appendChild(svg("text", { x: 16, y: 290, "font-size": 10, fill: C.muted, text: "Physical handles are interchangeable: a handle freed by the G1 storage can back a cartpole granule later. Virtual granules never move." }));
+      figure.appendChild(s);
+      stats.innerHTML = "";
+      const vtotal = STORES.reduce((a, st) => a + st.granules * GRANULE, 0), mapped = S.handles.filter((h) => h.owner !== null).length;
+      [["virtual reserved", `${vtotal} MiB, costs nothing`], ["physical mapped", `${mapped * GRANULE} MiB`], ["spare (unmapped, retained)", `${spare().length * GRANULE} MiB`], ["budget in use", `${retained()} / ${BUDGET} handles`]].forEach(([k, v]) => stats.appendChild(stat(k, v)));
+    }
+    root.appendChild(el("div", { class: "gc-toolbar" }, [button("Grow cartpole", () => grow(0), true), button("Grow G1", () => grow(1), true), button("Shrink cartpole (joined)", () => shrink(0)), button("Shrink G1 (joined)", () => shrink(1)), button("trim spare handles", trim), button("Reset", reset)]));
+    root.appendChild(el("div", { class: "gc-hint", text: "Top: contiguous virtual ranges, one per storage, sized for the maximum population. Bottom: the pool of physical granule handles the budget counts. Curves show which handle backs which virtual granule." }));
+    root.appendChild(figure); root.appendChild(stats); root.appendChild(log.box);
+    reset();
+  }
+
+  const widgets = { population, lifecycle, replay, backing, memory };
   function init() {
     document.querySelectorAll(".gc-widget").forEach((root) => {
       if (root.dataset.ready) return;
