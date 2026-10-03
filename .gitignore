@@ -1,2 +1,5 @@
-site/
+node_modules/
+build/
+.docusaurus/
 .venv*/
+site/

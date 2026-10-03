@@ -49,11 +49,11 @@
   }
 
   /* ------------------------------------------------------------------ */
-  /* 1. Population: directory rows, handles, readiness, prefix coverage  */
+  /* 1. Population: directory worlds, handles, readiness, prefix coverage  */
   /* ------------------------------------------------------------------ */
   function population(root) {
     const CAP = 16, GRANULE = 8;
-    const S = { rows: Array(CAP).fill(null), gen: {}, nextId: 0, ready: 8, dense: true, seq: 0, retired: [] };
+    const S = { worlds: Array(CAP).fill(null), gen: {}, nextId: 0, ready: 8, dense: true, seq: 0, retired: [] };
     const log = logPanel();
     const figure = el("div", { class: "gc-figure" });
     const stats = el("div", { class: "gc-stats" });
@@ -72,15 +72,15 @@
     }
     function create() {
       const free = freeRows();
-      if (!free.length) { log.add(`admit: NO_SLOTS. No free admissible row below ready=${S.ready}. Grow first.`, "bad"); render(); return; }
+      if (!free.length) { log.add(`admit: NO_SLOTS. No free admissible slot below ready=${S.ready}. Grow first.`, "bad"); render(); return; }
       const row = pick(free);
       const id = S.nextId++;
       S.gen[id] = (S.gen[id] || 0) + 1;
       S.rows[row] = { id, gen: S.gen[id], fresh: true };
       const wasDense = S.dense;
       publish("create");
-      log.add(`CREATE → id ${id} gen ${S.gen[id]} at row ${row}. live_count=${liveCount()}.` +
-        (wasDense ? " Dense certificate held, so the lowest free row was chosen; any publication clears it." : " Sparse mode: a free row in no promised order."));
+      log.add(`CREATE → world id ${id} gen ${S.gen[id]} at slot ${row}. live_count=${liveCount()}.` +
+        (wasDense ? " Dense certificate held, so the lowest free slot was chosen; any publication clears it." : " Sparse mode: a free slot in no promised order."));
       render();
     }
     function destroy(row) {
@@ -90,7 +90,7 @@
       S.gen[h.id] += 1;
       S.retired.push({ id: h.id, gen: h.gen, row });
       publish("destroy");
-      log.add(`DESTROY (${h.id}, ${h.gen}) at row ${row}. Row freed; generation advanced to ${S.gen[h.id]}, so handle (${h.id}, ${h.gen}) is stale forever. live_count=${liveCount()}.`);
+      log.add(`DESTROY world (${h.id}, ${h.gen}) at slot ${row}. Slot freed; generation advanced to ${S.gen[h.id]}, so handle (${h.id}, ${h.gen}) is stale forever. live_count=${liveCount()}.`);
       render();
     }
     function replace() {
@@ -105,7 +105,7 @@
       S.rows[dst] = { id: h.id, gen: S.gen[h.id], fresh: true };
       S.retired.push({ id: h.id, gen: h.gen, row: src });
       publish("replace");
-      log.add(`REPLACE (${h.id}, ${h.gen}) → same id, gen ${S.gen[h.id]}, new row ${dst}. Destination came from the pre-batch free set; row ${src} is freed. Snapshot admission.`);
+      log.add(`REPLACE (${h.id}, ${h.gen}) → same id, gen ${S.gen[h.id]}, new slot ${dst}. Destination came from the pre-batch free set; row ${src} is freed. Snapshot admission.`);
       render();
     }
     function compact() {
@@ -114,20 +114,20 @@
       const packed = Array(CAP).fill(null);
       live.forEach((h, i) => (packed[i] = { id: h.id, gen: h.gen, fresh: false }));
       S.rows = packed; S.dense = true; S.seq += 1;
-      log.add(`plan_compaction → ${moves} move(s); copies acknowledged; publish_compaction. Live rows are now [0, ${live.length}). Handles unchanged. Dense certificate restored.`, "good");
+      log.add(`plan_compaction → ${moves} move(s); copies acknowledged; publish_compaction. Live slots are now [0, ${live.length}). Handles unchanged. Dense certificate restored.`, "good");
       render();
     }
     function grow() {
       if (S.ready >= CAP) { log.add("Reserved capacity reached.", "bad"); return; }
       const before = S.ready;
       S.ready = Math.min(CAP, S.ready + GRANULE);
-      log.add(`map_backing → granule mapped, rows [${before}, ${S.ready}) backed. publish_ready(${S.ready}) after initialization. No reader join: nothing could address these rows yet.`, "good");
+      log.add(`map_backing → granule mapped, slots [${before}, ${S.ready}) backed. publish_ready(${S.ready}) after initialization. No reader join: nothing could address these rows yet.`, "good");
       render();
     }
     function lookupStale() {
       if (!S.retired.length) { log.add("No retired handles yet. Destroy or replace something first.", "bad"); return; }
       const h = S.retired[S.retired.length - 1];
-      log.add(`location(${h.id}, ${h.gen}) → invalid: current generation of id ${h.id} is ${S.gen[h.id]}. The old row ${h.row} may now hold another instance, and the stale handle cannot reach it.`, "bad");
+      log.add(`location(${h.id}, ${h.gen}) → invalid: current generation of id ${h.id} is ${S.gen[h.id]}. The old slot ${h.row} may now hold another instance, and the stale handle cannot reach it.`, "bad");
     }
     function reset() {
       S.rows = Array(CAP).fill(null); S.gen = {}; S.nextId = 0; S.ready = 8; S.dense = true; S.seq = 0; S.retired = [];
@@ -141,7 +141,7 @@
       const s = svg("svg", { viewBox: `0 0 ${W} 140`, width: "100%" });
       const live = liveCount();
       // prefix coverage bar
-      s.appendChild(svg("text", { x: x0, y: 20, "font-size": 12, fill: C.muted, text: `prefix kernel bound to live_count visits rows [0, ${live})` }));
+      s.appendChild(svg("text", { x: x0, y: 20, "font-size": 12, fill: C.muted, text: `prefix kernel bound to live_count visits slots [0, ${live})` }));
       s.appendChild(svg("rect", { x: x0, y: 28, width: Math.max(0, live * rowW - 4), height: 10, rx: 3, fill: C.live, opacity: 0.35 }));
       // ready marker
       s.appendChild(svg("line", { x1: x0 + S.ready * rowW - 2, y1: 24, x2: x0 + S.ready * rowW - 2, y2: 112, stroke: C.bad, "stroke-width": 2, "stroke-dasharray": "4 3" }));
@@ -163,16 +163,16 @@
       figure.appendChild(s);
       const outside = S.rows.filter((h, r) => h && r >= live).length;
       stats.innerHTML = "";
-      [["live_count", live], ["ready rows", S.ready], ["reserved rows", CAP], ["dense certificate", S.dense ? "holds" : "cleared"], ["live rows a prefix kernel misses", outside]].forEach(([k, v]) => stats.appendChild(stat(k, v)));
+      [["live_count", live], ["ready slots", S.ready], ["reserved slots", CAP], ["dense certificate", S.dense ? "holds" : "cleared"], ["live worlds a prefix kernel misses", outside]].forEach(([k, v]) => stats.appendChild(stat(k, v)));
       stats.lastChild.classList.toggle("gc-stat-bad", outside > 0);
     }
 
     root.appendChild(el("div", { class: "gc-toolbar" }, [
-      button("Create", create, true), button("Replace one", replace), button("Compact", compact), button("Grow (+8 rows)", grow), button("Look up a stale handle", lookupStale), button("Reset", reset),
+      button("Create", create, true), button("Replace one", replace), button("Compact", compact), button("Grow (+8 slots)", grow), button("Look up a stale handle", lookupStale), button("Reset", reset),
     ]));
-    root.appendChild(el("div", { class: "gc-hint", text: "Click a live row to destroy it. Blue: live. Green: created this step. Grey: free. Pale: reserved but not ready. Orange outline: live but outside the prefix a count-driven kernel visits." }));
+    root.appendChild(el("div", { class: "gc-hint", text: "Click a live world to destroy it. Blue: live. Green: created this step. Grey: free. Pale: reserved but not ready. Orange outline: live but outside the prefix a count-driven kernel visits." }));
     root.appendChild(figure); root.appendChild(stats); root.appendChild(log.box);
-    reset(); for (let i = 0; i < 6; i++) create(); log.add("Six instances created while the certificate held: they filled rows 0..5 in order.");
+    reset(); for (let i = 0; i < 6; i++) create(); log.add("Six worlds created while the certificate held: they filled rows 0..5 in order.");
   }
 
   /* ------------------------------------------------------------------ */
@@ -184,7 +184,7 @@
     const log = logPanel(); const table = el("div", { class: "gc-table" }); const phaseBar = el("div", { class: "gc-phases" }); const stats = el("div", { class: "gc-stats" });
     function fresh() {
       S.reqs = [
-        { op: "CREATE", id: "-", gen: "-", proto: 0, status: "", dest: "", note: "a new instance" },
+        { op: "CREATE", id: "-", gen: "-", proto: 0, status: "", dest: "", note: "a new world" },
         { op: "DESTROY", id: 1, gen: S.gens[1], proto: "-", status: "", dest: "", note: "valid handle" },
         { op: "DESTROY", id: 1, gen: S.gens[1] - 1 >= 1 ? S.gens[1] - 1 : 0, proto: "-", status: "", dest: "", note: "stale handle for the same identity" },
         { op: "REPLACE", id: 2, gen: S.gens[2], proto: 0, status: "", dest: "", note: "valid handle, new row" },
@@ -314,7 +314,7 @@
           s.appendChild(svg("rect", { x: x0 + b * BLOCK * unit + 1, y: 42, width: BLOCK * unit - 2, height: 44, rx: 4, fill: C.live, opacity: 0.25 }));
         }
         s.appendChild(svg("rect", { x: x0, y: 40, width: S.live * unit, height: 48, rx: 6, fill: C.live }));
-        s.appendChild(svg("text", { x: x0 + 8, y: 69, "font-size": 13, fill: "white", text: `${S.live} rows, ${Math.ceil(S.live / BLOCK)} block(s) of ${BLOCK}` }));
+        s.appendChild(svg("text", { x: x0 + 8, y: 69, "font-size": 13, fill: "white", text: `${S.live} worlds, ${Math.ceil(S.live / BLOCK)} block(s) of ${BLOCK}` }));
       } else {
         s.appendChild(svg("text", { x: x0 + 8, y: 69, "font-size": 13, fill: S.invalid ? C.bad : C.muted, text: S.invalid ? "disabled: count exceeds the declared maximum (errors[0] = -1)" : "disabled: count is 0" }));
       }
@@ -325,13 +325,13 @@
       if (bucket > 0 && !S.invalid) {
         s.appendChild(svg("rect", { x: x0, y: 130, width: bucket * unit, height: 36, rx: 6, fill: C.outside, opacity: 0.8 }));
         s.appendChild(svg("rect", { x: x0, y: 130, width: S.live * unit, height: 36, rx: 6, fill: C.live, opacity: 0.6 }));
-        s.appendChild(svg("text", { x: x0 + 8, y: 153, "font-size": 12, fill: "white", text: `${bucket} rows: ${bucket - S.live} wasted (${Math.round(100 * (bucket - S.live) / Math.max(1, S.live))}% of useful work)` }));
+        s.appendChild(svg("text", { x: x0 + 8, y: 153, "font-size": 12, fill: "white", text: `${bucket} worlds: ${bucket - S.live} wasted (${Math.round(100 * (bucket - S.live) / Math.max(1, S.live))}% of useful work)` }));
       }
       figure.appendChild(s);
       stats.innerHTML = "";
-      [["live count", S.live], ["rows executed", S.invalid || S.live === 0 ? 0 : S.live], ["padded bucket would execute", S.invalid ? "—" : bucket], ["replays so far", S.replays], ["updater cost per replay", "about 2 µs (measured)"]].forEach(([k, v]) => stats.appendChild(stat(k, v)));
+      [["live count", S.live], ["worlds executed", S.invalid || S.live === 0 ? 0 : S.live], ["padded bucket would execute", S.invalid ? "—" : bucket], ["replays so far", S.replays], ["updater cost per replay", "about 2 µs (measured)"]].forEach(([k, v]) => stats.appendChild(stat(k, v)));
     }
-    root.appendChild(el("div", { class: "gc-toolbar" }, [el("label", { class: "gc-label", text: "live count on the device" }), slider, button("Replay", doReplay, true), button("Publish an invalid count", () => { S.invalid = true; render(); }), button("Reset", () => { S.live = 16; S.invalid = false; S.replays = 0; slider.value = 16; render(); })]));
+    root.appendChild(el("div", { class: "gc-toolbar" }, [el("label", { class: "gc-label", text: "live world count on the device" }), slider, button("Replay", doReplay, true), button("Publish an invalid count", () => { S.invalid = true; render(); }), button("Reset", () => { S.live = 16; S.invalid = false; S.replays = 0; slider.value = 16; render(); })]));
     root.appendChild(el("div", { class: "gc-hint", text: "Drag the count. The graph is never re-captured; the updater node rewrites the kernel node's extent and grid at the start of each replay, or disables it." }));
     root.appendChild(figure); root.appendChild(stats); root.appendChild(log.box);
     render(); log.add("Graph captured once at capacity 32 and instantiated once. Move the slider, then press Replay.");
@@ -381,7 +381,7 @@
       figure.innerHTML = "";
       const W = 720, x0 = 24, gw = 160;
       const s = svg("svg", { viewBox: `0 0 ${W} 150`, width: "100%" });
-      s.appendChild(svg("text", { x: x0, y: 22, "font-size": 12, fill: C.muted, text: `reservation: ${ROWS} rows of virtual address, ${ROWS / G} granules of ${G} rows` }));
+      s.appendChild(svg("text", { x: x0, y: 22, "font-size": 12, fill: C.muted, text: `reservation: ${ROWS} slots of virtual address, ${ROWS / G} granules of ${G} slots` }));
       for (let g = 0; g < ROWS / G; g++) {
         const x = x0 + g * gw;
         const mapped = g < S.mappedGranules, hist = !mapped && g < S.highWater;
@@ -401,9 +401,9 @@
       if (S.inMaintenance) s.appendChild(svg("text", { x: W - 24, y: 142, "text-anchor": "end", "font-size": 12, fill: C.bad, text: "maintenance scope: joining readers…" }));
       figure.appendChild(s);
       stats.innerHTML = "";
-      [["mapped rows", S.mappedGranules * G], ["ready rows", S.ready], ["reserved rows", ROWS], ["high-water mark", S.highWater * G], ["fresh map needs a join?", S.mappedGranules < S.highWater ? "yes, historical" : "no"]].forEach(([k, v]) => stats.appendChild(stat(k, v)));
+      [["mapped slots", S.mappedGranules * G], ["ready slots", S.ready], ["reserved slots", ROWS], ["high-water mark", S.highWater * G], ["fresh map needs a join?", S.mappedGranules < S.highWater ? "yes, historical" : "no"]].forEach(([k, v]) => stats.appendChild(stat(k, v)));
     }
-    root.appendChild(el("div", { class: "gc-toolbar" }, [el("label", { class: "gc-label", text: "target rows" }), slider, button("map_backing", mapFresh, true), button("publish_ready", publishReady, true), button("resize_backing (shrink, joined)", shrink), button("Reset", reset)]));
+    root.appendChild(el("div", { class: "gc-toolbar" }, [el("label", { class: "gc-label", text: "target slots" }), slider, button("map_backing", mapFresh, true), button("publish_ready", publishReady, true), button("resize_backing (shrink, joined)", shrink), button("Reset", reset)]));
     root.appendChild(el("div", { class: "gc-hint", text: "Drag the target. Mapping rounds to granules; growth into never-mapped granules needs no reader join; shrinking and regrowth over a previously mapped granule go through a joined maintenance scope." }));
     root.appendChild(figure); root.appendChild(stats); root.appendChild(log.box);
     reset();
@@ -422,6 +422,6 @@
       if (fallback && fallback.classList && fallback.classList.contains("gc-fallback")) fallback.style.display = "none";
     });
   }
+  window.gcWidgetsInit = init;
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init); else init();
-  if (window.document$ && window.document$.subscribe) window.document$.subscribe(init);
 })();
