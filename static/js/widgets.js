@@ -52,127 +52,97 @@
   /* 1. Population: directory worlds, handles, readiness, prefix coverage  */
   /* ------------------------------------------------------------------ */
   function population(root) {
-    const CAP = 16, GRANULE = 8;
-    const S = { worlds: Array(CAP).fill(null), gen: {}, nextId: 0, ready: 8, dense: true, seq: 0, retired: [] };
-    const log = logPanel();
-    const figure = el("div", { class: "gc-figure" });
-    const stats = el("div", { class: "gc-stats" });
-
-    function liveCount() { return S.rows.filter(Boolean).length; }
-    function freeRows() { const out = []; for (let r = 0; r < S.ready; r++) if (!S.rows[r]) out.push(r); return out; }
-    function pick(free) {
-      if (S.dense) return free[0];
-      // sparse mode: the rebuilt free list has no promised order; model it as arbitrary.
-      const i = (S.seq * 7919 + free.length * 31) % free.length;
-      return free[i];
-    }
-    function publish(kind) {
-      S.seq += 1;
-      if (kind !== "noop") { S.dense = false; }
-    }
-    function create() {
-      const free = freeRows();
-      if (!free.length) { log.add(`admit: NO_SLOTS. No free admissible slot below ready=${S.ready}. Grow first.`, "bad"); render(); return; }
-      const row = pick(free);
-      const id = S.nextId++;
-      S.gen[id] = (S.gen[id] || 0) + 1;
-      S.rows[row] = { id, gen: S.gen[id], fresh: true };
-      const wasDense = S.dense;
-      publish("create");
-      log.add(`CREATE → world id ${id} gen ${S.gen[id]} at slot ${row}. live_count=${liveCount()}.` +
-        (wasDense ? " Dense certificate held, so the lowest free slot was chosen; any publication clears it." : " Sparse mode: a free slot in no promised order."));
+    const PROTOS = [
+      { name: "cartpole", cap: 16, ready: 8, bytes: 1, color: C.live, h: 34 },
+      { name: "G1 humanoid", cap: 8, ready: 4, bytes: 16, color: "#7c3aed", h: 34 },
+    ];
+    const S = { gen: {}, nextId: 0, dense: [true, true], seq: 0, retired: [], rows: PROTOS.map((p) => Array(p.cap).fill(null)), ready: PROTOS.map((p) => p.ready) };
+    const log = logPanel(); const figure = el("div", { class: "gc-figure" }); const stats = el("div", { class: "gc-stats" });
+    const liveCount = (k) => S.rows[k].filter(Boolean).length;
+    const freeRows = (k) => { const out = []; for (let r = 0; r < S.ready[k]; r++) if (!S.rows[k][r]) out.push(r); return out; };
+    const pick = (k, free) => (S.dense[k] ? free[0] : free[(S.seq * 7919 + free.length * 31) % free.length]);
+    const bytesLive = () => PROTOS.reduce((a, p, k) => a + liveCount(k) * p.bytes, 0);
+    function create(k) {
+      const p = PROTOS[k], free = freeRows(k);
+      if (!free.length) { log.add(`admit (${p.name}): NO_SLOTS. No free admissible slot below ready=${S.ready[k]}. Grow this prototype first.`, "bad"); render(); return; }
+      const row = pick(k, free), id = S.nextId++;
+      S.gen[id] = 1; S.rows[k][row] = { id, gen: 1, fresh: true };
+      const wasDense = S.dense[k]; S.dense[k] = false; S.seq += 1;
+      log.add(`CREATE ${p.name} → world id ${id} gen 1 at slot ${row}. ${p.name} live_count=${liveCount(k)}; Data bytes live=${bytesLive()} units (${p.bytes} unit${p.bytes > 1 ? "s" : ""} added).` +
+        (wasDense ? " Dense certificate held: lowest free slot. Any publication clears it." : " Sparse mode: a free slot in no promised order."));
       render();
     }
-    function destroy(row) {
-      const h = S.rows[row];
-      if (!h) return;
-      S.rows[row] = null;
-      S.gen[h.id] += 1;
-      S.retired.push({ id: h.id, gen: h.gen, row });
-      publish("destroy");
-      log.add(`DESTROY world (${h.id}, ${h.gen}) at slot ${row}. Slot freed; generation advanced to ${S.gen[h.id]}, so handle (${h.id}, ${h.gen}) is stale forever. live_count=${liveCount()}.`);
+    function destroy(k, row) {
+      const h = S.rows[k][row]; if (!h) return; const p = PROTOS[k];
+      S.rows[k][row] = null; S.gen[h.id] += 1; S.retired.push({ id: h.id, gen: h.gen, row, k }); S.dense[k] = false; S.seq += 1;
+      log.add(`DESTROY ${p.name} world (${h.id}, ${h.gen}) at slot ${row}. Slot freed, ${p.bytes} unit${p.bytes > 1 ? "s" : ""} of budget back; generation advanced to ${S.gen[h.id]}, so handle (${h.id}, ${h.gen}) is stale forever.`);
       render();
     }
-    function replace() {
-      const liveRows = S.rows.map((h, r) => (h ? r : -1)).filter((r) => r >= 0);
-      if (!liveRows.length) { log.add("REPLACE needs a live handle.", "bad"); return; }
-      const free = freeRows();
-      if (!free.length) { log.add("admit: NO_SLOTS for the replacement destination.", "bad"); return; }
-      const src = liveRows[(S.seq * 13) % liveRows.length];
-      const h = S.rows[src];
-      const dst = pick(free);
-      S.rows[src] = null; S.gen[h.id] += 1;
-      S.rows[dst] = { id: h.id, gen: S.gen[h.id], fresh: true };
-      S.retired.push({ id: h.id, gen: h.gen, row: src });
-      publish("replace");
-      log.add(`REPLACE (${h.id}, ${h.gen}) → same id, gen ${S.gen[h.id]}, new slot ${dst}. Destination came from the pre-batch free set; row ${src} is freed. Snapshot admission.`);
-      render();
-    }
-    function compact() {
-      const live = S.rows.map((h, r) => (h ? { ...h, from: r } : null)).filter(Boolean);
-      const moves = live.filter((h) => h.from >= live.length).length;
-      const packed = Array(CAP).fill(null);
+    function compact(k) {
+      const p = PROTOS[k]; const live = S.rows[k].map((h, r) => (h ? { ...h, from: r } : null)).filter(Boolean);
+      const moves = live.filter((h) => h.from >= live.length).length; const packed = Array(p.cap).fill(null);
       live.forEach((h, i) => (packed[i] = { id: h.id, gen: h.gen, fresh: false }));
-      S.rows = packed; S.dense = true; S.seq += 1;
-      log.add(`plan_compaction → ${moves} move(s); copies acknowledged; publish_compaction. Live slots are now [0, ${live.length}). Handles unchanged. Dense certificate restored.`, "good");
+      S.rows[k] = packed; S.dense[k] = true; S.seq += 1;
+      log.add(`plan_compaction (${p.name}) → ${moves} move(s), ${moves * p.bytes} unit(s) of Data copied and acknowledged; publish_compaction. Live slots are [0, ${live.length}). Handles unchanged. Certificate restored.`, "good");
       render();
     }
-    function grow() {
-      if (S.ready >= CAP) { log.add("Reserved capacity reached.", "bad"); return; }
-      const before = S.ready;
-      S.ready = Math.min(CAP, S.ready + GRANULE);
-      log.add(`map_backing → granule mapped, slots [${before}, ${S.ready}) backed. publish_ready(${S.ready}) after initialization. No reader join: nothing could address these rows yet.`, "good");
+    function grow(k) {
+      const p = PROTOS[k]; if (S.ready[k] >= p.cap) { log.add(`${p.name}: reserved capacity reached.`, "bad"); return; }
+      const before = S.ready[k]; S.ready[k] = Math.min(p.cap, S.ready[k] + (k === 0 ? 8 : 2));
+      log.add(`map_backing (${p.name}) → slots [${before}, ${S.ready[k]}) backed, ${(S.ready[k] - before) * p.bytes} unit(s) of pages mapped; publish_ready after initialization. No reader join: nothing could address these slots yet.`, "good");
       render();
     }
     function lookupStale() {
-      if (!S.retired.length) { log.add("No retired handles yet. Destroy or replace something first.", "bad"); return; }
+      if (!S.retired.length) { log.add("No retired handles yet. Destroy a world first.", "bad"); return; }
       const h = S.retired[S.retired.length - 1];
-      log.add(`location(${h.id}, ${h.gen}) → invalid: current generation of id ${h.id} is ${S.gen[h.id]}. The old slot ${h.row} may now hold another instance, and the stale handle cannot reach it.`, "bad");
+      log.add(`location(${h.id}, ${h.gen}) → invalid: current generation of id ${h.id} is ${S.gen[h.id]}. Slot ${h.row} of ${PROTOS[h.k].name} may now hold another world; the stale handle cannot reach it.`, "bad");
     }
     function reset() {
-      S.rows = Array(CAP).fill(null); S.gen = {}; S.nextId = 0; S.ready = 8; S.dense = true; S.seq = 0; S.retired = [];
-      log.add("allocate → empty directory, 8 of 16 rows ready, dense certificate holds.");
-      render();
+      S.rows = PROTOS.map((p) => Array(p.cap).fill(null)); S.ready = PROTOS.map((p) => p.ready); S.gen = {}; S.nextId = 0; S.dense = [true, true]; S.seq = 0; S.retired = [];
+      log.add("allocate(slot_limits=(16, 8)) → two empty prototypes. Cartpole: 8 of 16 slots ready. G1: 4 of 8 slots ready."); render();
     }
-
     function render() {
       figure.innerHTML = "";
-      const W = 720, rowW = 40, x0 = 24, y0 = 56;
-      const s = svg("svg", { viewBox: `0 0 ${W} 140`, width: "100%" });
-      const live = liveCount();
-      // prefix coverage bar
-      s.appendChild(svg("text", { x: x0, y: 20, "font-size": 12, fill: C.muted, text: `prefix kernel bound to live_count visits slots [0, ${live})` }));
-      s.appendChild(svg("rect", { x: x0, y: 28, width: Math.max(0, live * rowW - 4), height: 10, rx: 3, fill: C.live, opacity: 0.35 }));
-      // ready marker
-      s.appendChild(svg("line", { x1: x0 + S.ready * rowW - 2, y1: 24, x2: x0 + S.ready * rowW - 2, y2: 112, stroke: C.bad, "stroke-width": 2, "stroke-dasharray": "4 3" }));
-      s.appendChild(svg("text", { x: x0 + S.ready * rowW + 2, y: 122, "font-size": 11, fill: C.bad, text: `ready = ${S.ready}` }));
-      for (let r = 0; r < CAP; r++) {
-        const x = x0 + r * rowW, h = S.rows[r];
-        let fill = C.free, stroke = C.freeStroke;
-        if (r >= S.ready) { fill = C.unmapped; stroke = "#d1d5db"; }
-        if (h) { fill = h.fresh ? C.fresh : C.live; stroke = "#1f2937"; if (r >= live) stroke = C.outside; }
-        const rect = svg("rect", { x, y: y0, width: rowW - 4, height: 40, rx: 5, fill, stroke, "stroke-width": h && r >= live ? 3 : 1, class: h ? "gc-clickable" : "", onclick: () => destroy(r) });
-        if (h) rect.appendChild(svg("title", { text: `id ${h.id} gen ${h.gen}. Click to destroy.` }));
-        s.appendChild(rect);
-        if (h) {
-          s.appendChild(svg("text", { x: x + (rowW - 4) / 2, y: y0 + 17, "text-anchor": "middle", "font-size": 11, fill: "white", text: `${h.id}` }));
-          s.appendChild(svg("text", { x: x + (rowW - 4) / 2, y: y0 + 31, "text-anchor": "middle", "font-size": 10, fill: "white", text: `g${h.gen}` }));
+      const W = 720, x0 = 110, rowW = 36;
+      const s = svg("svg", { viewBox: `0 0 ${W} 190`, width: "100%" });
+      PROTOS.forEach((p, k) => {
+        const y0 = 30 + k * 80, live = liveCount(k);
+        s.appendChild(svg("text", { x: 16, y: y0 + 22, "font-size": 12, fill: C.text, "font-weight": "600", text: p.name }));
+        s.appendChild(svg("text", { x: 16, y: y0 + 38, "font-size": 10, fill: C.muted, text: `${p.bytes} unit${p.bytes > 1 ? "s" : ""} / world` }));
+        s.appendChild(svg("rect", { x: x0, y: y0 - 6, width: Math.max(0, live * rowW - 4), height: 5, rx: 2, fill: p.color, opacity: 0.35 }));
+        s.appendChild(svg("line", { x1: x0 + S.ready[k] * rowW - 2, y1: y0 - 8, x2: x0 + S.ready[k] * rowW - 2, y2: y0 + p.h + 6, stroke: C.bad, "stroke-width": 2, "stroke-dasharray": "4 3" }));
+        s.appendChild(svg("text", { x: x0 + S.ready[k] * rowW + 2, y: y0 + p.h + 16, "font-size": 10, fill: C.bad, text: `ready ${S.ready[k]}` }));
+        for (let r = 0; r < p.cap; r++) {
+          const x = x0 + r * rowW, h = S.rows[k][r];
+          let fill = C.free, stroke = C.freeStroke;
+          if (r >= S.ready[k]) { fill = C.unmapped; stroke = "#d1d5db"; }
+          if (h) { fill = h.fresh ? C.fresh : p.color; stroke = "#1f2937"; if (r >= live) stroke = C.outside; }
+          const rect = svg("rect", { x, y: y0, width: rowW - 4, height: p.h, rx: 5, fill, stroke, "stroke-width": h && r >= live ? 3 : 1, class: h ? "gc-clickable" : "", onclick: () => destroy(k, r) });
+          if (h) rect.appendChild(svg("title", { text: `${p.name} id ${h.id} gen ${h.gen}. Click to destroy.` }));
+          s.appendChild(rect);
+          if (h) {
+            s.appendChild(svg("text", { x: x + (rowW - 4) / 2, y: y0 + 14, "text-anchor": "middle", "font-size": 10, fill: "white", text: `${h.id}` }));
+            s.appendChild(svg("text", { x: x + (rowW - 4) / 2, y: y0 + 27, "text-anchor": "middle", "font-size": 9, fill: "white", text: `g${h.gen}` }));
+          }
+          s.appendChild(svg("text", { x: x + (rowW - 4) / 2, y: y0 + p.h + 16, "text-anchor": "middle", "font-size": 9, fill: C.muted, text: String(r) }));
         }
-        s.appendChild(svg("text", { x: x + (rowW - 4) / 2, y: y0 + 54, "text-anchor": "middle", "font-size": 10, fill: C.muted, text: String(r) }));
-      }
+      });
       figure.appendChild(s);
-      const outside = S.rows.filter((h, r) => h && r >= live).length;
       stats.innerHTML = "";
-      [["live_count", live], ["ready slots", S.ready], ["reserved slots", CAP], ["dense certificate", S.dense ? "holds" : "cleared"], ["live worlds a prefix kernel misses", outside]].forEach(([k, v]) => stats.appendChild(stat(k, v)));
+      const outside = PROTOS.reduce((a, p, k) => a + S.rows[k].filter((h, r) => h && r >= liveCount(k)).length, 0);
+      [["cartpole live", liveCount(0)], ["G1 live", liveCount(1)], ["Data bytes live", `${bytesLive()} units`], ["cartpole certificate", S.dense[0] ? "holds" : "cleared"], ["G1 certificate", S.dense[1] ? "holds" : "cleared"], ["live worlds a prefix kernel misses", outside]].forEach(([k, v]) => stats.appendChild(stat(k, v)));
       stats.lastChild.classList.toggle("gc-stat-bad", outside > 0);
     }
-
     root.appendChild(el("div", { class: "gc-toolbar" }, [
-      button("Create", create, true), button("Replace one", replace), button("Compact", compact), button("Grow (+8 slots)", grow), button("Look up a stale handle", lookupStale), button("Reset", reset),
+      button("Create cartpole", () => create(0), true), button("Create G1", () => create(1), true),
+      button("Compact cartpoles", () => compact(0)), button("Compact G1s", () => compact(1)),
+      button("Grow cartpole backing", () => grow(0)), button("Grow G1 backing", () => grow(1)),
+      button("Look up a stale handle", lookupStale), button("Reset", reset),
     ]));
-    root.appendChild(el("div", { class: "gc-hint", text: "Click a live world to destroy it. Blue: live. Green: created this step. Grey: free. Pale: reserved but not ready. Orange outline: live but outside the prefix a count-driven kernel visits." }));
+    root.appendChild(el("div", { class: "gc-hint", text: "Click a live world to destroy it. One unit = one cartpole world's Data; a G1 world is 16 units. Green: created this step. Grey: free. Pale: reserved but not ready. Orange outline: live but outside the prefix a count-driven kernel visits." }));
     root.appendChild(figure); root.appendChild(stats); root.appendChild(log.box);
-    reset(); for (let i = 0; i < 6; i++) create(); log.add("Six worlds created while the certificate held: they filled rows 0..5 in order.");
+    reset(); for (let i = 0; i < 6; i++) create(0); for (let i = 0; i < 3; i++) create(1);
+    log.add("Six cartpoles and three G1s created while both certificates held: each prototype filled its lowest slots in order. Data bytes live = 6 + 48 = 54 units.");
   }
 
   /* ------------------------------------------------------------------ */
