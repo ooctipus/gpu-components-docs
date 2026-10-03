@@ -108,7 +108,7 @@
         const y0 = 28 + k * 72, live = liveCount(k);
         s.appendChild(svg("text", { x: 16, y: y0 + 16, "font-size": 12, fill: C.text, "font-weight": "600", text: p.name }));
         s.appendChild(svg("text", { x: 16, y: y0 + 31, "font-size": 9.5, fill: C.muted, text: `${p.cap} slots · ${p.bytes} unit${p.bytes > 1 ? "s" : ""}/world` }));
-        s.appendChild(svg("text", { x: x0, y: y0 - 7, "font-size": 9.5, fill: C.muted, text: `kernel bound to live_count = ${live} runs slots [0, ${live})` }));
+        s.appendChild(svg("text", { x: x0, y: y0 - 7, "font-size": 9.5, fill: C.muted, text: live ? `the step kernel runs over world indices 0 to ${live - 1} (nworld = live_count = ${live})` : "the step kernel runs over no worlds (live_count = 0)" }));
         s.appendChild(svg("rect", { x: x0, y: y0 - 4, width: Math.max(0, live * rowW - 4), height: 3, rx: 1.5, fill: p.color, opacity: 0.5 }));
         for (let r = 0; r < p.cap; r++) {
           const x = x0 + r * rowW, h = S.rows[k][r], admissible = r < S.adm[k];
@@ -128,7 +128,7 @@
       figure.appendChild(s);
       stats.innerHTML = "";
       const outside = PROTOS.reduce((a, p, k) => a + S.rows[k].filter((h, r) => h && r >= liveCount(k)).length, 0);
-      [["cartpole live", liveCount(0)], ["G1 live", liveCount(1)], ["Data in use", `${bytesLive()} units`], ["live worlds outside the kernel prefix", outside]].forEach(([k, v]) => stats.appendChild(stat(k, v)));
+      [["cartpole live", liveCount(0)], ["G1 live", liveCount(1)], ["Data in use", `${bytesLive()} units`], ["live worlds the step kernel skips", outside]].forEach(([k, v]) => stats.appendChild(stat(k, v)));
       stats.lastChild.classList.toggle("gc-stat-bad", outside > 0);
     }
     root.appendChild(el("div", { class: "gc-toolbar" }, [
@@ -137,7 +137,7 @@
       button("Admit more cartpole slots", () => admit(0)), button("Admit more G1 slots", () => admit(1)),
       button("Look up a stale handle", lookupStale), button("Reset", reset),
     ]));
-    root.appendChild(el("div", { class: "gc-hint", text: "Each row is one prototype's slots, a single contiguous range. Colored boxes are live worlds; grey boxes are free; dashed boxes are not yet admissible. Click a live world to destroy it. Orange outline: live, but outside the prefix a count-driven kernel runs." }));
+    root.appendChild(el("div", { class: "gc-hint", text: "Each row is one prototype's slots, a single contiguous range. Colored boxes are live worlds; grey boxes are free; dashed boxes are not yet admissible. Click a live world to destroy it. Orange outline: a live world at an index the step kernel does not reach; compaction fixes that." }));
     root.appendChild(figure); root.appendChild(stats); root.appendChild(note);
     reset();
   }
