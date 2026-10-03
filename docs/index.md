@@ -24,7 +24,7 @@ Episodes end at different times, replacements arrive, and the training loop late
 2. A reference to a destroyed world is detectably stale.
 3. Memory freed by one world is accounted and reusable, including across prototypes.
 
-<div class="gc-widget" data-widget="population"></div>
+<div class="gc-widget" data-widget="stack"></div>
 <div class="gc-fallback">
 
 ![Two prototypes of worlds: episodes end, worlds are created, nothing is reallocated](/img/population.svg)

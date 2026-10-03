@@ -563,7 +563,105 @@
     log.add("48 cartpoles and 4 G1s live, 112 units in use. Move the split or lower the budget, then Reset."); render();
   }
 
-  const widgets = { population, lifecycle, replay, backing, memory, distribution };
+  /* ------------------------------------------------------------------ */
+  /* 7. Stack: occupancy, virtual addresses, physical granules, aligned   */
+  /* ------------------------------------------------------------------ */
+  function stack(root) {
+    // granule = 8 units; cartpole 1 unit/world -> 8 slots per granule; G1 16 units/world -> 2 granules per slot
+    const P = [
+      { name: "cartpole", cap: 16, bytes: 1, color: C.live, grow: 8 },
+      { name: "G1 humanoid", cap: 8, bytes: 16, color: "#7c3aed", grow: 2 },
+    ];
+    const GU = 8, BUDGET = 24; // granule units, physical budget in granules
+    const S = { rows: P.map((p) => Array(p.cap).fill(null)), mapped: [1, 8], gen: {}, nextId: 0, dense: [true, true], seq: 0, retired: [], handles: 0, note: "" };
+    const figure = el("div", { class: "gc-figure" }); const stats = el("div", { class: "gc-stats" }); const note = el("div", { class: "gc-note" });
+    const say = (m, bad) => { note.textContent = m; note.classList.toggle("gc-note-bad", !!bad); };
+    const live = (k) => S.rows[k].filter(Boolean).length;
+    const readySlots = (k) => Math.min(P[k].cap, Math.floor((S.mapped[k] * GU) / P[k].bytes));
+    const freeSlots = (k) => { const o = []; for (let r = 0; r < readySlots(k); r++) if (!S.rows[k][r]) o.push(r); return o; };
+    const granulesUsed = () => S.mapped[0] + S.mapped[1];
+    function create(k) {
+      const p = P[k], free = freeSlots(k);
+      if (!free.length) { say(`${p.name}: no free slot with pages behind it. Map more granules first.`, true); render(); return; }
+      const slot = S.dense[k] ? free[0] : free[(S.seq * 7919 + free.length * 31) % free.length];
+      const id = S.nextId++; S.gen[id] = 1; S.rows[k][slot] = { id, gen: 1 }; S.dense[k] = false; S.seq += 1;
+      say(`CREATE ${p.name} world ${id} in slot ${slot}. Only the directory row changed; the slot's address and its pages were already there.`); render();
+    }
+    function destroy(k, slot) {
+      const h = S.rows[k][slot]; if (!h) return; S.rows[k][slot] = null; S.gen[h.id] += 1; S.retired.push({ id: h.id, gen: h.gen, slot, k }); S.dense[k] = false; S.seq += 1;
+      say(`DESTROY ${P[k].name} world ${h.id}. Slot ${slot} is free; its address and pages are unchanged. Handle (${h.id}, ${h.gen}) is stale.`); render();
+    }
+    function compact(k) {
+      const p = P[k], lv = S.rows[k].map((h, r) => (h ? { ...h, from: r } : null)).filter(Boolean);
+      const moves = lv.filter((h) => h.from >= lv.length).length; const packed = Array(p.cap).fill(null); lv.forEach((h, i) => (packed[i] = { id: h.id, gen: h.gen }));
+      S.rows[k] = packed; S.dense[k] = true; S.seq += 1;
+      say(`Compaction (${p.name}): ${moves} world(s) copied into the lowest slots. Data moved between slots; addresses and pages did not move.`); render();
+    }
+    function map(k) {
+      const p = P[k], need = Math.ceil((p.grow * p.bytes) / GU);
+      if (readySlots(k) >= p.cap) { say(`${p.name}: the whole reservation is already mapped.`, true); return; }
+      if (granulesUsed() + need > BUDGET) { say(`map (${p.name}): MemoryError before any driver call; ${need} more granules would exceed the budget of ${BUDGET}.`, true); render(); return; }
+      S.mapped[k] += need; S.handles += need;
+      say(`map_backing (${p.name}): ${need} granule(s) mapped under the next ${p.grow} slots, then publish_ready. The virtual row did not change; the physical row grew.`); render();
+    }
+    function unmap(k) {
+      const p = P[k], need = Math.ceil((p.grow * p.bytes) / GU);
+      const newReady = Math.floor(((S.mapped[k] - need) * GU) / p.bytes);
+      if (S.mapped[k] - need < 0 || live(k) > 0 && S.rows[k].slice(newReady).some(Boolean)) { say(`${p.name}: cannot unmap slots that hold live worlds. Destroy or compact first.`, true); return; }
+      S.mapped[k] -= need; say(`resize_backing (${p.name}), joined: readiness lowered, then ${need} granule(s) unmapped. The virtual row is unchanged; slots ≥ ${newReady} have no pages again.`); render();
+    }
+    function lookupStale() { if (!S.retired.length) { say("Destroy a world first.", true); return; } const h = S.retired[S.retired.length - 1]; say(`location(${h.id}, ${h.gen}) → invalid: identity ${h.id} is at generation ${S.gen[h.id]}.`, true); }
+    function reset() { S.rows = P.map((p) => Array(p.cap).fill(null)); S.mapped = [1, 8]; S.gen = {}; S.nextId = 0; S.dense = [true, true]; S.seq = 0; S.retired = []; for (let i = 0; i < 6; i++) create(0); for (let i = 0; i < 3; i++) create(1); say("Three rows per prototype. Directory: which slots hold worlds. Virtual: one contiguous range of addresses. Physical: which granules are mapped under it."); render(); }
+    function render() {
+      figure.innerHTML = "";
+      const W = 860, x0 = 190, sw = 38; const s = svg("svg", { viewBox: `0 0 ${W} 330`, width: "100%" });
+      P.forEach((p, k) => {
+        const y = 22 + k * 158, lv = live(k), ready = readySlots(k);
+        s.appendChild(svg("text", { x: 16, y: y + 10, "font-size": 12, "font-weight": "600", fill: C.text, text: `${p.name}  ·  ${p.bytes} unit${p.bytes > 1 ? "s" : ""}/world` }));
+        // row 1: directory
+        s.appendChild(svg("text", { x: 16, y: y + 42, "font-size": 10, fill: C.muted, text: "directory: live worlds" }));
+        s.appendChild(svg("text", { x: 16, y: y + 54, "font-size": 9, fill: C.muted, text: `kernel runs indices 0..${Math.max(0, lv - 1)}` }));
+        for (let r = 0; r < p.cap; r++) {
+          const x = x0 + r * sw, h = S.rows[k][r];
+          const rect = svg("rect", { x, y: y + 26, width: sw - 4, height: 30, rx: 4, fill: h ? p.color : "#ffffff", stroke: h ? (r >= lv ? C.outside : "#1f2937") : "#d1d5db", "stroke-width": h && r >= lv ? 3 : 1, class: h ? "gc-clickable" : "", onclick: () => destroy(k, r) });
+          if (h) rect.appendChild(svg("title", { text: `world ${h.id}, generation ${h.gen}. Click to destroy.` }));
+          s.appendChild(rect);
+          if (h) { s.appendChild(svg("text", { x: x + (sw - 4) / 2, y: y + 39, "text-anchor": "middle", "font-size": 9, fill: "white", text: `id ${h.id}` })); s.appendChild(svg("text", { x: x + (sw - 4) / 2, y: y + 50, "text-anchor": "middle", "font-size": 8, fill: "white", text: `gen ${h.gen}` })); }
+        }
+        // row 2: virtual
+        s.appendChild(svg("text", { x: 16, y: y + 80, "font-size": 10, fill: C.muted, text: "virtual: one contiguous range" }));
+        s.appendChild(svg("text", { x: 16, y: y + 92, "font-size": 9, fill: C.muted, text: `slot i at base + i × stride` }));
+        s.appendChild(svg("rect", { x: x0, y: y + 68, width: p.cap * sw - 4, height: 26, rx: 4, fill: "#f8fafc", stroke: "#1f2937" }));
+        for (let r = 0; r < p.cap; r++) { if (r) s.appendChild(svg("line", { x1: x0 + r * sw - 2, y1: y + 68, x2: x0 + r * sw - 2, y2: y + 94, stroke: "#cbd5e1" })); s.appendChild(svg("text", { x: x0 + r * sw + (sw - 4) / 2, y: y + 85, "text-anchor": "middle", "font-size": 9, fill: C.muted, text: String(r) })); }
+        // row 3: physical
+        const unitW = sw / p.bytes, gW = GU * unitW, totalG = Math.ceil((p.cap * p.bytes) / GU);
+        s.appendChild(svg("text", { x: 16, y: y + 118, "font-size": 10, fill: C.muted, text: "physical: mapped granules" }));
+        s.appendChild(svg("text", { x: 16, y: y + 130, "font-size": 9, fill: C.muted, text: `${S.mapped[k]} of ${totalG} · ${ready} slots ready` }));
+        for (let g = 0; g < totalG; g++) {
+          const gx = x0 + g * gW, m = g < S.mapped[k];
+          s.appendChild(svg("rect", { x: gx, y: y + 106, width: Math.max(2, gW - 3), height: 24, rx: 3, fill: m ? "#93c5fd" : "none", stroke: m ? "#1f2937" : "#d1d5db", "stroke-dasharray": m ? "" : "3 3" }));
+          if (m && gW > 26) s.appendChild(svg("text", { x: gx + (gW - 3) / 2, y: y + 122, "text-anchor": "middle", "font-size": 8.5, fill: "#111827", text: "2 MiB" }));
+        }
+        if (ready < p.cap) s.appendChild(svg("text", { x: x0 + ready * sw, y: y + 144, "font-size": 9, fill: C.muted, text: `← slots ${ready}..${p.cap - 1}: reserved, no pages` }));
+      });
+      figure.appendChild(s);
+      stats.innerHTML = "";
+      const outside = P.reduce((a, p, k) => a + S.rows[k].filter((h, r) => h && r >= live(k)).length, 0);
+      [["cartpole live", live(0)], ["G1 live", live(1)], ["physical granules", `${granulesUsed()} of ${BUDGET}`], ["live worlds the kernel skips", outside]].forEach(([k, v]) => stats.appendChild(stat(k, v)));
+      stats.lastChild.classList.toggle("gc-stat-bad", outside > 0);
+    }
+    root.appendChild(el("div", { class: "gc-toolbar" }, [
+      button("Create cartpole", () => create(0), true), button("Create G1", () => create(1), true),
+      button("Compact cartpoles", () => compact(0)), button("Compact G1s", () => compact(1)),
+      button("Map more cartpole pages", () => map(0)), button("Map more G1 pages", () => map(1)),
+      button("Unmap cartpole tail", () => unmap(0)), button("Unmap G1 tail", () => unmap(1)),
+      button("Look up a stale handle", lookupStale), button("Reset", reset),
+    ]));
+    root.appendChild(el("div", { class: "gc-hint", text: "Each action changes exactly one row. Create, destroy and compact change the directory row only. Map and unmap change the physical row only. Nothing ever changes the virtual row. Click a live world to destroy it." }));
+    root.appendChild(figure); root.appendChild(stats); root.appendChild(note); reset();
+  }
+
+  const widgets = { population, lifecycle, replay, backing, memory, distribution, stack };
   function init() {
     document.querySelectorAll(".gc-widget").forEach((root) => {
       if (root.dataset.ready) return;
