@@ -272,7 +272,8 @@
     const S = { live: 16, invalid: false, replays: 0 };
     const log = logPanel(); const figure = el("div", { class: "gc-figure" }); const stats = el("div", { class: "gc-stats" });
     const slider = el("input", { type: "range", min: 0, max: CAP, value: S.live, class: "gc-slider" });
-    slider.addEventListener("input", () => { S.live = +slider.value; S.invalid = false; render(); });
+    const readout = el("span", { class: "gc-readout", text: `${S.live} of ${CAP}` });
+    slider.addEventListener("input", () => { S.live = +slider.value; S.invalid = false; readout.textContent = `${S.live} of ${CAP}`; render(); });
     function doReplay() {
       S.replays += 1;
       const count = S.invalid ? CAP + 9 : S.live;
@@ -316,7 +317,7 @@
       stats.innerHTML = "";
       [["live count", S.live], ["worlds executed", S.invalid || S.live === 0 ? 0 : S.live], ["padded bucket would execute", S.invalid ? "—" : bucket], ["replays so far", S.replays], ["updater cost per replay", "about 2 µs (measured)"]].forEach(([k, v]) => stats.appendChild(stat(k, v)));
     }
-    root.appendChild(el("div", { class: "gc-toolbar" }, [el("label", { class: "gc-label", text: "live world count on the device" }), slider, button("Replay", doReplay, true), button("Publish an invalid count", () => { S.invalid = true; render(); }), button("Reset", () => { S.live = 16; S.invalid = false; S.replays = 0; slider.value = 16; render(); })]));
+    root.appendChild(el("div", { class: "gc-toolbar" }, [el("label", { class: "gc-label", text: "live world count on the device" }), slider, readout, button("Replay", doReplay, true), button("Publish an invalid count", () => { S.invalid = true; render(); }), button("Reset", () => { S.live = 16; S.invalid = false; S.replays = 0; slider.value = 16; readout.textContent = `16 of ${CAP}`; render(); })]));
     root.appendChild(el("div", { class: "gc-hint", text: "Drag the count. The graph is never re-captured; the updater node rewrites the kernel node's extent and grid at the start of each replay, or disables it." }));
     root.appendChild(figure); root.appendChild(stats); root.appendChild(log.box);
     render(); log.add("Graph captured once at capacity 32 and instantiated once. Move the slider, then press Replay.");
@@ -330,7 +331,8 @@
     const S = { mappedGranules: 1, ready: 16, highWater: 1, target: 24, inMaintenance: false };
     const log = logPanel(); const figure = el("div", { class: "gc-figure" }); const stats = el("div", { class: "gc-stats" });
     const slider = el("input", { type: "range", min: 0, max: ROWS, value: S.target, class: "gc-slider" });
-    slider.addEventListener("input", () => { S.target = +slider.value; render(); });
+    const readout = el("span", { class: "gc-readout", text: `${S.target} slots → ${Math.ceil(S.target / G)} granule(s)` });
+    slider.addEventListener("input", () => { S.target = +slider.value; readout.textContent = `${S.target} slots → ${Math.ceil(S.target / G)} granule(s)`; render(); });
     const granulesFor = (rows) => Math.ceil(rows / G);
     function mapFresh() {
       const need = granulesFor(S.target);
@@ -361,7 +363,7 @@
         render();
       }, 900);
     }
-    function reset() { S.mappedGranules = 1; S.ready = 16; S.highWater = 1; S.target = 24; slider.value = 24; S.inMaintenance = false; log.add("reserve 64 rows; map 1 granule; ready 16. Budget: 3 granules."); render(); }
+    function reset() { S.mappedGranules = 1; S.ready = 16; S.highWater = 1; S.target = 24; slider.value = 24; readout.textContent = `24 slots → 2 granule(s)`; S.inMaintenance = false; log.add("reserve 64 rows; map 1 granule; ready 16. Budget: 3 granules."); render(); }
     function render() {
       figure.innerHTML = "";
       const W = 720, x0 = 24, gw = 160;
@@ -388,7 +390,7 @@
       stats.innerHTML = "";
       [["mapped slots", S.mappedGranules * G], ["ready slots", S.ready], ["reserved slots", ROWS], ["high-water mark", S.highWater * G], ["fresh map needs a join?", S.mappedGranules < S.highWater ? "yes, historical" : "no"]].forEach(([k, v]) => stats.appendChild(stat(k, v)));
     }
-    root.appendChild(el("div", { class: "gc-toolbar" }, [el("label", { class: "gc-label", text: "target slots" }), slider, button("map_backing", mapFresh, true), button("publish_ready", publishReady, true), button("resize_backing (shrink, joined)", shrink), button("Reset", reset)]));
+    root.appendChild(el("div", { class: "gc-toolbar" }, [el("label", { class: "gc-label", text: "target slots" }), slider, readout, button("map_backing", mapFresh, true), button("publish_ready", publishReady, true), button("resize_backing (shrink, joined)", shrink), button("Reset", reset)]));
     root.appendChild(el("div", { class: "gc-hint", text: "Drag the target. Mapping rounds to granules; growth into never-mapped granules needs no reader join; shrinking and regrowth over a previously mapped granule go through a joined maintenance scope." }));
     root.appendChild(figure); root.appendChild(stats); root.appendChild(log.box);
     reset();
@@ -484,7 +486,12 @@
     const used = () => S.live[0] * P[0].bytes + S.live[1] * P[1].bytes;
     const targets = () => [Math.min(P[0].slots, S.desired[0]), Math.min(P[1].slots, S.desired[1])];
     const desiredUnits = () => S.desired[0] * P[0].bytes + S.desired[1] * P[1].bytes;
-    const sl = (label, min, max, step, val, oninput) => { const i = el("input", { type: "range", min, max, step, value: val, class: "gc-slider" }); i.addEventListener("input", oninput); return [el("label", { class: "gc-label", text: label }), i]; };
+    const sl = (label, min, max, step, val, oninput, fmt) => {
+      const i = el("input", { type: "range", min, max, step, value: val, class: "gc-slider" });
+      const out = el("span", { class: "gc-readout", text: (fmt || String)(val) });
+      i.addEventListener("input", (e) => { out.textContent = (fmt || String)(+e.target.value); oninput(e); });
+      return [el("label", { class: "gc-label", text: label }), i, out];
+    };
     function reset() {
       S.seq += 1;
       const tgt = targets();
@@ -556,11 +563,11 @@
         batchBox.appendChild(r);
       }
     }
-    const [l1, s1] = sl("memory budget (units; 1 cartpole = 1, 1 G1 = 16)", 16, 256, 8, S.budget, (e) => { S.budget = +e.target.value; render(); });
-    const [l2, s2] = sl("desired cartpole worlds", 0, P[0].slots, 1, S.desired[0], (e) => { S.desired[0] = +e.target.value; render(); });
-    const [l4, s4] = sl("desired G1 worlds", 0, P[1].slots, 1, S.desired[1], (e) => { S.desired[1] = +e.target.value; render(); });
-    const [l3, s3] = sl("episodes ending per reset", 0, 1, 0.05, S.ending, (e) => { S.ending = +e.target.value; render(); });
-    root.appendChild(el("div", { class: "gc-toolbar gc-toolbar-col" }, [el("div", { class: "gc-ctrl" }, [l1, s1]), el("div", { class: "gc-ctrl" }, [l2, s2]), el("div", { class: "gc-ctrl" }, [l4, s4]), el("div", { class: "gc-ctrl" }, [l3, s3]), button("Reset (run one batch)", reset, true), button("Start over", () => { S.live = [48, 4]; S.seq = 0; S.lastBatch = null; log.add("48 cartpoles and 4 G1s live, 112 units in use."); render(); })]));
+    const [l1, s1_i, s1_o] = sl("memory budget (units; 1 cartpole = 1, 1 G1 = 16)", 16, 256, 8, S.budget, (e) => { S.budget = +e.target.value; render(); }, (v) => `${v} units`);
+    const [l2, s2_i, s2_o] = sl("desired cartpole worlds", 0, P[0].slots, 1, S.desired[0], (e) => { S.desired[0] = +e.target.value; render(); }, (v) => `${v} worlds = ${v} units`);
+    const [l4, s4_i, s4_o] = sl("desired G1 worlds", 0, P[1].slots, 1, S.desired[1], (e) => { S.desired[1] = +e.target.value; render(); }, (v) => `${v} worlds = ${v * 16} units`);
+    const [l3, s3_i, s3_o] = sl("episodes ending per reset", 0, 1, 0.05, S.ending, (e) => { S.ending = +e.target.value; render(); }, (v) => `${Math.round(v * 100)}%`);
+    root.appendChild(el("div", { class: "gc-toolbar gc-toolbar-col" }, [el("div", { class: "gc-ctrl" }, [l1, s1_i, s1_o]), el("div", { class: "gc-ctrl" }, [l2, s2_i, s2_o]), el("div", { class: "gc-ctrl" }, [l4, s4_i, s4_o]), el("div", { class: "gc-ctrl" }, [l3, s3_i, s3_o]), button("Reset (run one batch)", reset, true), button("Start over", () => { S.live = [48, 4]; S.seq = 0; S.lastBatch = null; log.add("48 cartpoles and 4 G1s live, 112 units in use."); render(); })]));
     root.appendChild(el("div", { class: "gc-hint", text: "Set a budget and the desired number of worlds of each prototype, then press Reset. Each reset is one directory batch: ended worlds are REPLACEd into the prototype the target needs, or DESTROYed; CREATEs fill the remainder while the budget and the slot limits allow. The two kernel counts the graph follows update with the live sets." }));
     root.appendChild(figure); root.appendChild(stats); root.appendChild(batchBox); root.appendChild(log.box);
     log.add("48 cartpoles and 4 G1s live, 112 units in use. Change the desired counts or lower the budget, then Reset."); render();
