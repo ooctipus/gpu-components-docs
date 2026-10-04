@@ -1,0 +1,134 @@
+.example {
+  margin: 1.5rem 0;
+  color: var(--ifm-font-color-base);
+  font: inherit;
+}
+
+.caption {
+  display: grid;
+  gap: 0.2rem;
+  margin-bottom: 0.8rem;
+}
+
+.caption > span,
+.rowNumber,
+.note {
+  color: var(--ifm-color-emphasis-700);
+}
+
+.controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+}
+
+.controls button {
+  min-height: 44px;
+  padding: 0.45rem 0.8rem;
+  border: 1px solid var(--ifm-color-emphasis-400);
+  border-radius: 4px;
+  background: var(--ifm-background-color);
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.controls button:hover {
+  background: var(--ifm-color-emphasis-100);
+}
+
+.controls button[aria-pressed='true'] {
+  border-color: var(--ifm-font-color-base);
+  background: var(--ifm-color-emphasis-100);
+  font-weight: 600;
+}
+
+.controls button:focus-visible {
+  outline: 2px solid var(--ifm-font-color-base);
+  outline-offset: 3px;
+}
+
+.groups {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1rem;
+  align-items: start;
+}
+
+.group {
+  min-width: 0;
+  border: 1px solid var(--ifm-color-emphasis-300);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.groupHeading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.25rem 0.75rem;
+  padding: 0.65rem 0.8rem;
+  border-bottom: 1px solid var(--ifm-color-emphasis-300);
+  background: var(--ifm-color-emphasis-100);
+}
+
+.rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.rows > li {
+  display: grid;
+  grid-template-columns: 3.3rem 1fr;
+  align-items: baseline;
+  gap: 0.15rem 0.75rem;
+  margin: 0;
+  padding: 0.65rem 0.8rem;
+  border-left: 3px solid transparent;
+}
+
+.rows > li + li {
+  border-top: 1px solid var(--ifm-color-emphasis-200);
+}
+
+.rows > .resetWorld {
+  border-left-color: var(--ifm-color-primary);
+  background: color-mix(in srgb, var(--ifm-color-primary) 7%, var(--ifm-background-color));
+}
+
+.resetWorld > strong,
+.resetLabel {
+  color: var(--ifm-color-primary);
+}
+
+.composition,
+.resetLabel {
+  grid-column: 2;
+}
+
+.resetLabel {
+  font-size: 0.9em;
+}
+
+.status {
+  margin: 0.9rem 0 0.5rem;
+}
+
+.note {
+  margin: 0;
+  font-size: 0.9em;
+}
+
+.note + .note {
+  margin-top: 0.5rem;
+}
+
+@media (max-width: 600px) {
+  .groups {
+    grid-template-columns: 1fr;
+    gap: 0.75rem;
+  }
+}
