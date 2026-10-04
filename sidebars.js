@@ -8,6 +8,7 @@ module.exports = {
     { type: "category", label: "Concepts", collapsed: false, items: ["concepts/handles", "concepts/memory", "concepts/quantities", "concepts/lifecycle", "concepts/replay"] },
     "quickstart",
     "tutorial",
+    "integration",
     { type: "category", label: "API", collapsed: false, items: ["api/directory", "api/fields", "api/backing", "api/graph"] },
     "invariants",
     "background",
