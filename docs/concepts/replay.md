@@ -32,8 +32,8 @@ sequenceDiagram
 
 </div>
 
-On the bridge's microbenchmark the updater adds about 2 µs per replay, against 25 to 68 percent wasted work for power-of-two padding. The requirement is that every bound kernel is a Warp kernel with the known launch ABI. MJWarp kernels are. Library kernels such as cuBLAS cannot be resized this way, which is why LLM serving systems pad and this package does not.
+The earlier bridge microbenchmark measured about 2 µs per updater replay. This is not a whole-application speedup measurement. Binding requires a Warp kernel with the known launch ABI; library calls such as cuBLAS need a different integration.
 
 :::note In MJWarp
-With the custom Warp branch, `d.nworld` is a `wp.CountParameter`, and ordinary `wp.launch(kernel, dim=d.nworld, ...)` calls record the occurrence. Newton binds that parameter to `world_storage.protected_count`; `d.naconmax` and `d.naccdmax` bind to the contact and CCD `ready_count`. The numerical code does not change.
+With custom Warp, `d.nworld` is a `wp.CountParameter`, and ordinary `wp.launch(kernel, dim=d.nworld, ...)` calls record it. Newton binds that parameter to the live world count. It binds `d.naconmax` and `d.naccdmax` to separate contact and CCD counts, limited by readiness across every required storage. The numerical kernels retain their equations; allocations and copies must also carry the appropriate count. See [Integration](../integration.md).
 :::

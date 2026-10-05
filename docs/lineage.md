@@ -6,7 +6,7 @@ sidebar_position: 3
 
 # Where the waits go
 
-Stable addresses let us reuse the graph. GPU counts let it process a changing population. Neither makes memory maintenance free. The next steps remove particular waits while keeping the same safety condition: no reader may access memory after it is unmapped.
+Stable addresses let us reuse the graph. GPU counts let it process a changing population. Neither makes memory maintenance free. The same safety rule applies to both shrink paths: no reader may access memory after it is unmapped.
 
 <div class="gc-widget" data-widget="ladder"></div>
 
@@ -16,7 +16,7 @@ Stable addresses let us reuse the graph. GPU counts let it process a changing po
 
 **Deferred retirement** submits the withdrawal in GPU stream order and returns. Earlier readers finish while the CPU can submit other work. Reclaim polls completion and unmaps only when safe. This removes the explicit CPU reader wait; driver calls still take time and can affect concurrent work.
 
-The currently published IsaacLab keyboard reset path still chooses joined resize for shrinking. The new Newton and GPU Components retirement APIs make deferred use possible; adding those APIs alone does not change that task policy or establish a training speedup.
+The current IsaacLab keyboard reset path calls `mujoco_worlds_grow_backing` for growth and blocking `mujoco_worlds_resize_backing` when shrinking. Newton and GPU Components also support deferred retirement; the task must explicitly choose it.
 
 ## What is not automatic
 

@@ -385,7 +385,7 @@
   function memory(root) {
     const GRANULE = 2; // MiB
     // Sizing rule: every storage reserves the whole budget, so planned maximum = budget ÷ stride.
-    // Full MJWarp Data per world: cartpole about 1.5 KiB, G1 about 24 KiB, a 16:1 ratio.
+    // Illustrative payload sizes, not measurements of full engine storage.
     const BUDGET = 16; // page handles = 32 MiB; each storage reserves 32 MiB
     const STORES = [
       { name: "cartpole storage", stride: 1536, color: C.live },
@@ -432,7 +432,6 @@
           s.appendChild(svg("rect", { x, y, width: gw - 4, height: 30, rx: 4, fill: m ? st.color : "#fafafa", stroke: m ? "#1f2937" : "#cbd5e1", "stroke-dasharray": m ? "" : "3 3" }));
           s.appendChild(svg("text", { x: x + (gw - 4) / 2, y: y + 19, "text-anchor": "middle", "font-size": 10, fill: m ? "white" : C.muted, text: m ? `#${m.id}` : `v${g}` }));
         }
-        s.appendChild(svg("text", { x: x0 + st.pages * gw + 4, y: y + 19, "font-size": 9.5, fill: C.muted, text: `slot i at base + i × ${st.stride}` }));
         // world-count ticks along the byte axis
         [0.25, 0.5, 0.75, 1].forEach((f) => {
           const tx = x0 + f * st.pages * gw - 2;
@@ -461,9 +460,12 @@
       const vtotal = STORES.reduce((a, st) => a + st.pages * GRANULE, 0), mapped = S.handles.filter((h) => h.owner !== null).length;
       [["virtual reserved", `${vtotal} MiB (no payload backing)`], ["physical mapped", `${mapped * GRANULE} MiB`], ["in the pool (unmapped, still counted)", `${spare().length * GRANULE} MiB`], ["budget in use", `${retained()} / ${BUDGET} handles`]].forEach(([k, v]) => stats.appendChild(stat(k, v)));
     };
-    const growBtns = [button("Map cartpole pages (host)", () => grow(0), true), button("Map G1 pages (host)", () => grow(1), true)];
-    root.appendChild(el("div", { class: "gc-toolbar" }, [growBtns[0], growBtns[1], button("Withdraw + reclaim cartpole tail → pool", () => shrink(0)), button("Withdraw + reclaim G1 tail → pool", () => shrink(1)), button("Trim pool (cuMemRelease)", trim), button("Start over (figure only)", reset)]));
-    const origRender = render; render = function () { origRender(); STORES.forEach((st, k) => { const full = S.mapped[k].length >= st.pages; growBtns[k].disabled = full; growBtns[k].textContent = full ? `${st.name.split(" ")[0]}: reservation fully mapped` : `Map ${st.name.split(" ")[0]} pages (host)`; }); };
+    const growBtns = STORES.map((st, k) => button(`Map ${st.name.split(" ")[0]} page`, () => grow(k), true));
+    const costs = STORES.map(() => el("span", { class: "gc-action-cost" }));
+    root.appendChild(el("div", { class: "gc-operations" }, growBtns.map((b, k) => el("div", { class: "gc-operation" }, [b, costs[k]]))));
+    root.appendChild(el("div", { class: "gc-toolbar" }, [button("Return cartpole page to pool", () => shrink(0)), button("Return G1 page to pool", () => shrink(1)), button("Release pool (driver call)", trim), button("Start over", reset)]));
+    root.appendChild(el("p", { class: "gc-hint", text: "Returning a page stops new users, polls earlier GPU work, then unmaps it. The CPU does not wait for those readers; unmapping still has a driver cost. This drawing simulates completion after a short delay." }));
+    const origRender = render; render = function () { origRender(); STORES.forEach((st, k) => { const full = S.mapped[k].length >= st.pages; growBtns[k].disabled = full; costs[k].textContent = full ? "All reserved pages mapped" : S.mapped[k].length < S.highWater[k] ? "CPU wait + driver calls (shown path)" : "Driver calls; can overlap GPU work"; }); };
     root.appendChild(el("div", { class: "gc-hint", text: "Top: contiguous virtual ranges, one per storage, sized for the maximum population. Bottom: the pool of page handles the budget counts. Curves show which handle backs which virtual page." }));
     root.appendChild(figure); root.appendChild(stats); root.appendChild(log.box);
     reset();
@@ -485,7 +487,7 @@
       budget: { min: 16, max: 256, step: 8, init: 128 }, live: [48, 4], GU: 8, granuleNote: "page = 8 units",
       fmt: (v) => `${v} units`, unitNote: "units; 1 cartpole = 1, 1 G1 = 16",
       stack: { GU: 4, BUDGET: 6, mapped: [1, 3], init: [3, 2], sw: 27,
-        protos: [{ bytes: 1, grow: 4 }, { bytes: 4, grow: 1 }],
+        protos: [{ bytes: 1 }, { bytes: 4 }],
         note: "G1 is drawn at 4× a cartpole, not 16×, so both fit on screen; page = 4 units" },
     },
     franka: {
@@ -498,7 +500,7 @@
       budget: { min: 16384, max: 262144, step: 8192, init: 65536 }, live: [4, 4, 4, 4], GU: 8192, granuleNote: "page drawn as 8 KiB so the figure fits; actual granularity is queried from CUDA",
       fmt: (v) => `${Math.round(v / 1024)} KiB`, unitNote: "bytes; one world is 816, 1,488, 944 or 688 B",
       stack: { GU: 22, BUDGET: 5, mapped: [1, 1, 1, 1], init: [3, 2, 3, 4], sw: 30,
-        protos: [{ bytes: 6, grow: 4 }, { bytes: 11, grow: 2 }, { bytes: 7, grow: 3 }, { bytes: 5, grow: 4 }],
+        protos: [{ bytes: 6 }, { bytes: 11 }, { bytes: 7 }, { bytes: 5 }],
         note: "worlds to scale, 816 : 1,488 : 944 : 688 B ≈ 6 : 11 : 7 : 5 units; page = 22 units" },
     },
   };
@@ -652,16 +654,17 @@
     // every prototype reserves the whole budget: cap = budget ÷ bytes per world
     const P = ST.protos.map((p, k) => ({ ...p, cap: Math.floor((BUDGET * GU) / p.bytes), name: SC.protos[k].name, color: PALETTE[k] })), N = P.length;
     const S = { rows: [], mapped: [], highWater: [], pending: [], pool: 0, gen: {}, nextId: 0, dense: [], seq: 0, retired: [] };
-    const figure = el("div", { class: "gc-figure" }); const stats = el("div", { class: "gc-stats" }); const note = el("div", { class: "gc-note" });
+    const figure = el("div", { class: "gc-figure gc-stack-figure" }); const stats = el("div", { class: "gc-stats" }); const note = el("div", { class: "gc-note", "aria-live": "polite" });
+    const progress = el("div", { class: "gc-retirement", "aria-live": "polite" });
     const say = (m, bad) => { note.textContent = m; note.classList.toggle("gc-note-bad", !!bad); };
     const live = (k) => S.rows[k].filter(Boolean).length;
-    const readySlots = (k) => Math.min(P[k].cap, Math.floor(((S.mapped[k] - (S.pending[k] || 0)) * GU) / P[k].bytes));
+    const readySlots = (k) => Math.min(P[k].cap, Math.floor(((S.mapped[k] - (S.pending[k]?.pages || 0)) * GU) / P[k].bytes));
     const freeSlots = (k) => { const o = []; for (let r = 0; r < readySlots(k); r++) if (!S.rows[k][r]) o.push(r); return o; };
     const granulesMapped = () => S.mapped.reduce((a, v) => a + v, 0);
     const granulesUsed = () => granulesMapped() + S.pool;
     function create(k) {
       const p = P[k], free = freeSlots(k);
-      if (!free.length) { say(`${p.name}: no free slot with pages behind it. Map more pages first.`, true); render(); return; }
+      if (!free.length) { say(`${p.name}: no available slot. ${S.pending[k] ? "The closing page cannot receive new worlds. Finish the earlier GPU work, then keep and reopen it or unmap it." : "Map more pages first."}`, true); render(); return; }
       const slot = S.dense[k] ? free[0] : free[(S.seq * 7919 + free.length * 31) % free.length];
       const id = S.nextId++; S.gen[id] = 1; S.rows[k][slot] = { id, gen: 1 }; S.dense[k] = false; S.seq += 1;
       say(`CREATE ${p.name} world ${id} in slot ${slot}. The task initializes the payload and publishes its directory entry; the slot address and mappings stay unchanged.`); render();
@@ -679,64 +682,77 @@
       say(`Compaction (${p.name}): ${moves} world(s) copied into the lowest slots. Data moved between slots; addresses and pages did not move.`); render();
     }
     function map(k) {
-      const p = P[k], need = Math.ceil((p.grow * p.bytes) / GU);
-      if (S.pending[k]) { say(`${p.name}: a withdrawal is pending; reclaim or cancel it before mapping.`, true); return; }
+      const p = P[k], need = 1;
+      if (S.pending[k]) { say(`${p.name}: finish the pending unmap or keep and reopen the pages before growing.`, true); return; }
       if (readySlots(k) >= p.cap) { say(`${p.name}: the whole reservation is already mapped.`, true); return; }
       const fromPool = Math.min(S.pool, need), fresh = need - fromPool;
       if (granulesUsed() + fresh > BUDGET) { say(`map (${p.name}): MemoryError before any driver call; ${fresh} new handle(s) would exceed the budget of ${BUDGET} (${S.pool} in the pool is not enough). Unmap another prototype's tail first.`, true); render(); return; }
       const historical = S.mapped[k] < S.highWater[k];
       S.pool -= fromPool; S.mapped[k] += need; S.highWater[k] = Math.max(S.highWater[k], S.mapped[k]);
-      say(`map_backing (${p.name}): ${need} page(s) mapped${fromPool ? `, ${fromPool} taken from the pool` : ""}${fresh ? `, ${fresh} new (cuMemCreate)` : ""}, then publish_ready. Host calls change mapping, then GPU publication changes readiness. The virtual range stays fixed. ${historical ? "Historical addresses require joined maintenance." : "Fresh addresses need no explicit reader join; driver cost remains."}`); render();
+      say(`${p.name}: mapped ${need} page(s)${fromPool ? ` from the pool (${fromPool})` : ""}${fresh ? `; allocated ${fresh} new block(s)` : ""} and made their slots available. ${historical ? "This drawing uses a CPU wait before remapping previously used addresses." : "Mapping these new addresses can overlap existing GPU work."} Map and access-permission calls still cost CPU time.`); render();
     }
-    function unmap(k) {
-      const p = P[k], need = Math.ceil((p.grow * p.bytes) / GU);
-      if (S.pending[k]) { say(`${p.name}: a withdrawal is already pending; reclaim it first.`, true); return; }
+    function withdraw(k) {
+      const p = P[k], need = 1;
+      if (S.pending[k]) { say(`${p.name}: a page is already closing. Finish or cancel that unmap first.`, true); return; }
       const newReady = Math.max(0, Math.floor(((S.mapped[k] - need) * GU) / p.bytes));
       if (S.mapped[k] - need < 0 || (live(k) > 0 && S.rows[k].slice(newReady).some(Boolean))) { say(`${p.name}: cannot withdraw slots that hold live worlds. Destroy or compact first.`, true); return; }
-      S.pending[k] = need; say(`withdraw_backing (${p.name}): ready lowered to ${newReady} slots as an ordered device write after waiting on the reader streams; a completion event is recorded. The ${need} page(s) stay mapped until reclaim. No explicit CPU reader wait; this drawing shows the accepted GPU result.`); render();
+      S.pending[k] = { pages: need, complete: false };
+      say(`${p.name}: stop new work in slots ${newReady} and above. The CPU queues this change and returns. The GPU must finish earlier accesses first; ${need} page(s) stay mapped and still use the budget. New worlds may use the remaining available slots.`); render();
     }
     function reclaim(k) {
-      const p = P[k]; if (!S.pending[k]) { say(`${p.name}: nothing withdrawn.`, true); return; }
-      const need = S.pending[k]; S.pending[k] = 0; S.mapped[k] -= need; S.pool += need;
-      say(`reclaim_backing (${p.name}): the completion event has passed, so ${need} page(s) are unmapped into the pool. No CPU join; had the event not passed, this would return pending and nothing would change.`); render();
+      const p = P[k]; if (!S.pending[k]) { say(`${p.name}: no page is waiting to be unmapped.`, true); return; }
+      if (!S.pending[k].complete) { say(`${p.name}: not ready yet. Earlier GPU work has not finished. This check returns immediately; no page is unmapped.`, true); return; }
+      const need = S.pending[k].pages; S.pending[k] = null; S.mapped[k] -= need; S.pool += need;
+      say(`${p.name}: earlier GPU work is complete. Unmapped ${need} page(s); their memory is now in the pool for another prototype. The CPU calls cuMemUnmap without a reader wait. That driver call still takes time.`); render();
+    }
+    function finishReaders(k) {
+      if (!S.pending[k]) return;
+      S.pending[k].complete = true;
+      say(`${P[k].name}: earlier GPU work has finished. The remaining worlds can run while the CPU unmaps the unused pages. Or keep and reopen the pages to avoid unmapping.`); render();
+    }
+    function reopen(k) {
+      if (!S.pending[k]) { say("There is no pending unmap to cancel.", true); return; }
+      if (!S.pending[k].complete) { say("Cancellation also checks completion. Earlier GPU work has not finished; try again later.", true); return; }
+      S.pending[k] = null;
+      say(`${P[k].name}: cancelled the unmap, then restored readiness and directory admission. New worlds can use the pages again. No unmap, remap or physical allocation.`); render();
     }
     function lookupStale() { if (!S.retired.length) { say("Destroy a world first.", true); return; } const h = S.retired[S.retired.length - 1]; say(`location(${h.id}, ${h.gen}) → invalid: identity ${h.id} is at generation ${S.gen[h.id]}.`, true); }
-    function trim() { if (!S.pool) { say("trim: the pool is empty.", true); return; } const n = S.pool; S.pool = 0; say(`trim: cuMemRelease on ${n} pooled handle(s); the budget in use drops by ${n}.`); render(); }
-    function reset() { S.rows = P.map((p) => Array(p.cap).fill(null)); S.mapped = ST.mapped.slice(); S.highWater = ST.mapped.slice(); S.pending = P.map(() => 0); S.pool = BUDGET - ST.mapped.reduce((a, v) => a + v, 0); S.gen = {}; S.nextId = 0; S.dense = P.map(() => true); S.seq = 0; S.retired = []; ST.init.forEach((n, k) => { for (let i = 0; i < n; i++) create(k); }); say(`Three layers per prototype. Directory: which slots hold worlds. Virtual: one contiguous range of addresses, sized to the whole budget of ${BUDGET} pages. Physical: which pages are mapped under it; this figure starts with a warm spare pool. The package can also create handles on demand.`); render(); }
+    function trim() { if (!S.pool) { say("The pool is empty.", true); return; } const n = S.pool; S.pool = 0; say(`Released ${n} unmapped block(s) with cuMemRelease. This example uses a blocking maintenance scope: the CPU waits for GPU readers first. Keeping pooled blocks avoids allocating them again.`); render(); }
+    function reset() { S.rows = P.map((p) => Array(p.cap).fill(null)); S.mapped = ST.mapped.slice(); S.highWater = ST.mapped.slice(); S.pending = P.map(() => null); S.pool = BUDGET - ST.mapped.reduce((a, v) => a + v, 0); S.gen = {}; S.nextId = 0; S.dense = P.map(() => true); S.seq = 0; S.retired = []; ST.init.forEach((n, k) => { for (let i = 0; i < n; i++) create(k); }); say("Click a world to remove it. Its memory stays mapped until you choose to return the unused pages."); render(); }
     function render() {
       figure.innerHTML = "";
       const RH = 100, W = 860, x0 = 150, sw = ST.sw || 38; const s = svg("svg", { viewBox: `0 0 ${W} ${14 + N * RH + 28}`, width: "100%" });
       P.forEach((p, k) => {
         const y = 14 + k * RH, lv = live(k), ready = readySlots(k), sel = k === S.sel;
         if (sel) s.appendChild(svg("rect", { x: 6, y: y - 4, width: W - 12, height: RH - 4, rx: 6, fill: "none", stroke: p.color, "stroke-width": 1.5, "stroke-dasharray": "4 3" }));
-        s.appendChild(svg("text", { x: 16, y: y + 9, "font-size": 11, "font-weight": "600", fill: C.text, text: `${p.name} · ${p.bytes} unit${p.bytes > 1 ? "s" : ""}/world · ${p.cap} slots = budget ÷ ${p.bytes}` }));
-        s.appendChild(svg("text", { x: 16, y: y + 29, "font-size": 8.5, fill: C.muted, text: `directory · kernel 0..${Math.max(0, lv - 1)}` }));
+        s.appendChild(svg("text", { x: 16, y: y + 9, "font-size": 11, "font-weight": "600", fill: C.text, text: `${p.name} · ${p.cap} reserved slots` }));
+        s.appendChild(svg("text", { x: 16, y: y + 29, "font-size": 11, fill: C.muted, text: `worlds · ${lv} live` }));
         for (let r = 0; r < p.cap; r++) {
           const x = x0 + r * sw, h = S.rows[k][r];
           const rect = svg("rect", { x, y: y + 15, width: sw - 3, height: 22, rx: 3, fill: h ? p.color : "#ffffff", stroke: h ? (r >= lv ? C.outside : "#1f2937") : "#d1d5db", "stroke-width": h && r >= lv ? 2.5 : 1, class: h ? "gc-clickable" : "", onclick: () => destroy(k, r) });
           if (h) rect.appendChild(svg("title", { text: `world ${h.id}, generation ${h.gen}. Click to destroy.` }));
           s.appendChild(rect);
-          if (h) s.appendChild(svg("text", { x: x + (sw - 3) / 2, y: y + 29, "text-anchor": "middle", "font-size": 8, fill: "white", text: `${h.id}·g${h.gen}` }));
+          if (h) s.appendChild(svg("text", { x: x + (sw - 3) / 2, y: y + 29, "text-anchor": "middle", "font-size": 9.5, fill: "white", text: `${h.id}·g${h.gen}` }));
         }
-        s.appendChild(svg("text", { x: 16, y: y + 53, "font-size": 8.5, fill: C.muted, text: `virtual · base + i × ${p.bytes}` }));
+        s.appendChild(svg("text", { x: 16, y: y + 53, "font-size": 11, fill: C.muted, text: "addresses · unchanged" }));
         s.appendChild(svg("rect", { x: x0, y: y + 42, width: p.cap * sw - 3, height: 16, rx: 3, fill: "#f8fafc", stroke: "#1f2937" }));
-        for (let r = 0; r < p.cap; r++) { if (r) s.appendChild(svg("line", { x1: x0 + r * sw - 1.5, y1: y + 42, x2: x0 + r * sw - 1.5, y2: y + 58, stroke: "#cbd5e1" })); s.appendChild(svg("text", { x: x0 + r * sw + (sw - 3) / 2, y: y + 53, "text-anchor": "middle", "font-size": 8, fill: C.muted, text: String(r) })); }
+        for (let r = 0; r < p.cap; r++) { if (r) s.appendChild(svg("line", { x1: x0 + r * sw - 1.5, y1: y + 42, x2: x0 + r * sw - 1.5, y2: y + 58, stroke: "#cbd5e1" })); s.appendChild(svg("text", { x: x0 + r * sw + (sw - 3) / 2, y: y + 53, "text-anchor": "middle", "font-size": 9.5, fill: C.muted, text: String(r) })); }
         const unitW = sw / p.bytes, gW = GU * unitW, totalG = BUDGET;
-        s.appendChild(svg("text", { x: 16, y: y + 75, "font-size": 8.5, fill: C.muted, text: `physical · ${S.mapped[k]} of ${totalG} · ${ready} ready` }));
+        s.appendChild(svg("text", { x: 16, y: y + 75, "font-size": 11, fill: C.muted, text: `memory · ${ready} usable slots` }));
         for (let g = 0; g < totalG; g++) {
-          const gx = x0 + g * gW, m = g < S.mapped[k], pend = m && g >= S.mapped[k] - (S.pending[k] || 0), gw = Math.min(gW - 3, p.cap * sw - 3 - g * gW);
-          s.appendChild(svg("rect", { x: gx, y: y + 64, width: Math.max(2, gw), height: 16, rx: 3, fill: pend ? "#fde68a" : m ? "#93c5fd" : "none", stroke: m ? "#1f2937" : "#d1d5db", "stroke-dasharray": m ? "" : "3 3" }));
-          if (m && gw > 26) s.appendChild(svg("text", { x: gx + gw / 2, y: y + 75, "text-anchor": "middle", "font-size": 7.5, fill: "#111827", text: "2 MiB" }));
+          const gx = x0 + g * gW, m = g < S.mapped[k], pend = m && g >= S.mapped[k] - (S.pending[k]?.pages || 0), gw = Math.min(gW - 3, p.cap * sw - 3 - g * gW);
+          s.appendChild(svg("rect", { x: gx, y: y + 64, width: Math.max(2, gw), height: 16, rx: 3, fill: pend ? "#fed7aa" : m ? "#93c5fd" : "none", stroke: m ? "#1f2937" : "#d1d5db", "stroke-dasharray": m ? "" : "3 3" }));
+          if (m && gw > 26) s.appendChild(svg("text", { x: gx + gw / 2, y: y + 75, "text-anchor": "middle", "font-size": 10, fill: "#111827", text: pend ? "closing" : "mapped" }));
         }
-        if (ready < p.cap) s.appendChild(svg("text", { x: x0 + ready * sw, y: y + 91, "font-size": 8, fill: C.muted, text: `← slots ${ready}..${p.cap - 1}: ${S.pending[k] ? "not ready; yellow pages still mapped" : "not ready; backing ends at the page boundary"}` }));
+        if (ready < p.cap) s.appendChild(svg("text", { x: x0 + ready * sw, y: y + 91, "font-size": 9.5, fill: C.muted, text: `← no new worlds here${S.pending[k] ? "; orange pages still use memory" : ""}` }));
       });
       const py = 14 + N * RH + 6;
-      s.appendChild(svg("text", { x: 16, y: py + 11, "font-size": 8.5, fill: C.muted, text: `pool: ${S.pool} retained handles, unmapped` }));
+      s.appendChild(svg("text", { x: 16, y: py + 11, "font-size": 11, fill: C.muted, text: `pool: ${S.pool} free blocks` }));
       for (let g = 0; g < BUDGET; g++) {
         const gx = x0 + g * 26, state = g < granulesMapped() ? "mapped" : g < granulesUsed() ? "pool" : "free";
         s.appendChild(svg("rect", { x: gx, y: py, width: 22, height: 14, rx: 3, fill: state === "mapped" ? "#93c5fd" : state === "pool" ? "#fde68a" : "none", stroke: state === "free" ? "#d1d5db" : "#1f2937", "stroke-dasharray": state === "free" ? "3 3" : "" }));
       }
-      s.appendChild(svg("text", { x: x0 + BUDGET * 26 + 8, y: py + 11, "font-size": 8.5, fill: C.muted, text: `budget ${BUDGET}: blue mapped · yellow pool · dashed released by trim` }));
+      s.appendChild(svg("text", { x: x0 + BUDGET * 26 + 8, y: py + 11, "font-size": 11, fill: C.muted, text: `shared budget: ${BUDGET} blocks · yellow blocks can be reused` }));
       figure.appendChild(s);
       stats.innerHTML = "";
       const outside = P.reduce((a, p, k) => a + S.rows[k].filter((h, r) => h && r >= live(k)).length, 0);
@@ -744,24 +760,36 @@
       stats.appendChild(stat("page handles", `${granulesMapped()} mapped · ${S.pool} pooled · ${granulesUsed()} of ${BUDGET} budget`));
       const o = stat("live worlds the kernel skips", outside); o.classList.toggle("gc-stat-bad", outside > 0); stats.appendChild(o);
       chips.forEach((c, k) => c.classList.toggle("gc-btn-primary", k === S.sel));
+      const pending = S.pending[S.sel];
+      progress.hidden = !pending;
+      progressText.textContent = pending?.complete ? "GPU finished. The pages can now be unmapped or reopened." : "Earlier GPU work is still using the old range. The CPU is free to submit other work.";
+      finishButton.disabled = !pending || pending.complete;
+      const historical = S.mapped[S.sel] < S.highWater[S.sel];
+      mapAction.querySelector(".gc-action-cost").textContent = historical ? "CPU wait + driver calls" : "Driver calls; can overlap GPU work";
+      mapAction.classList.toggle("gc-operation-wait", historical);
     }
     S.sel = 0;
-    const tag = (where, text, title) => { const t = el("span", { class: `gc-tag gc-tag-${where}`, text }); if (title) t.setAttribute("title", title); return t; };
     const chips = P.map((p, k) => button(shortName(p), () => { S.sel = k; render(); }));
     root.appendChild(el("div", { class: "gc-toolbar" }, [el("span", { class: "gc-label", text: "prototype:" })].concat(chips)));
-    const act = (where, label, fn, title) => { const b = button(label, () => fn(S.sel)); b.setAttribute("title", title); return el("span", { class: "gc-action" }, [tag(where, where, title), b]); };
-    root.appendChild(el("div", { class: "gc-toolbar" }, [
-      act("graph", "Create", create, "Directory batch inside the captured step; replayable. Click a live world to destroy it, the same kind of operation."),
-      act("graph", "Compact", compact, "Directory moves inside the captured step; replayable. Data is copied between slots; addresses and pages do not move."),
-      act("host", "Map pages", map, "Host map and permission calls. Fresh addresses need no explicit reader join; reusing historical addresses requires maintenance. Uses pooled handles first, otherwise creates within budget. Driver calls can fail."),
-      act("host", "Withdraw tail", unmap, "Host submission orders GPU readiness withdrawal after all supplied readers, then records completion. Pages stay mapped; no CPU reader wait is performed."),
-      act("host", "Reclaim", reclaim, "Polls completion, then issues CPU unmap calls if ready; returns pending otherwise. No explicit CPU reader wait. Handles go to the pool; driver cost remains."),
-      act("host", "Trim pool", (k) => trim(), "Releases pooled handles inside authorized maintenance. That scope must prove completion, by waiting or completed events. Reusing an existing scope adds no second join."),
-      act("graph", "Stale lookup", (k) => lookupStale(), "Look up the most recently destroyed handle: the generation check fails."),
-      button("Start over (figure only)", reset),
+    const act = (label, fn, cost) => el("div", { class: "gc-operation" }, [button(label, () => fn(S.sel)), el("span", { class: "gc-action-cost", text: cost })]);
+    const mapAction = act("Map pages", map, "Driver calls; can overlap GPU work");
+    root.appendChild(el("div", { class: "gc-operations" }, [
+      act("Create world", create, "GPU work"), act("Compact worlds", compact, "GPU copies"), mapAction,
+      act("Stop using last page", withdraw, "Queue GPU work; no CPU wait"),
+      act("Unmap unused pages", reclaim, "Poll; driver calls when ready"),
+      act("Keep & reopen pages", reopen, "Cancel + republish; no remap"),
     ]));
-    root.appendChild(el("div", { class: "gc-hint", text: `Pick a prototype, then an action; hover an action for what it does and where it runs. graph = captured GPU work; host = CPU operation, not a no-wait guarantee. Withdrawn pages stay mapped (yellow) until reclaim. Fresh map needs no reader join; historical remap requires maintenance. The reserved virtual ranges stay fixed for their lifetime. ${ST.note}.` }));
-    root.appendChild(figure); root.appendChild(stats); root.appendChild(note); reset();
+    const progressText = el("span", {});
+    const finishButton = button("Finish earlier GPU work (simulate)", () => finishReaders(S.sel));
+    progress.append(progressText, finishButton);
+    root.appendChild(progress);
+    root.appendChild(figure); root.appendChild(stats); root.appendChild(note);
+    const extra = el("details", { class: "gc-stack-extra" }, [el("summary", { text: "Other actions and drawing scale" })]);
+    const trimAction = act("Release pooled memory", trim, "CPU wait + driver calls (shown path)");
+    trimAction.classList.add("gc-operation-wait");
+    extra.appendChild(el("div", { class: "gc-operations" }, [trimAction, act("Check stale handle", lookupStale, "GPU lookup"), act("Start over", reset, "Reset this drawing")]));
+    extra.appendChild(el("p", { class: "gc-hint", text: `Illustration only: ${ST.note}. The pool starts allocated. Real map, access-permission and unmap costs depend on the GPU and page count; the drawing does not measure them.` }));
+    root.appendChild(extra); reset();
   }
   /* ------------------------------------------------------------------ */
   /* 8. Compare: three designs, one sequence of events                   */

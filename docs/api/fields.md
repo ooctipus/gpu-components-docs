@@ -30,8 +30,8 @@ Typed Data storage, fills, copies, indexed transfers and readiness.
 
 ## Notes
 
-`protected_count` is a contiguous int32 device array of shape `(1,)` that the storage borrows. In Newton it is the live world count. It constrains shrinking only; every operation receives its own count.
+`protected_count` is a borrowed contiguous int32 device array of shape `(1,)`. Storage cannot reclaim rows below it. Each operation still receives its own work count. Newton uses the live count for persistent world state; contact and temporary storage can use different protection counts.
 
-`ready_count` is published by the storage and read by kernels and by the graph updater. Contact and CCD storages in Newton expose it as the source for `naconmax` and `naccdmax`.
+`ready_count` describes the physically accessible prefix of one storage. It does not mean those rows contain initialized episode state. Newton combines the readiness of all required storages before publishing its separate contact and CCD work counts.
 
 Withdrawal requires all reader streams, no concurrent submission while ordering the cut, and future access bounded by the accepted prefix. Host `ready_rows` is updated when reclaim or cancel observes completion. Pending retirement blocks other capacity mutations. Cancellation is refused after reclamation has begun; partial unmap errors retain remaining ownership for retry. Close joins outstanding readers before releasing retirement resources.

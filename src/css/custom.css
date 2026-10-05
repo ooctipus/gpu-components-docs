@@ -20,7 +20,7 @@
   --ifm-color-primary-lighter: #bfdbfe;
   --ifm-color-primary-lightest: #dbeafe;
 }
-.markdown table { display: table; width: 100%; }
+.markdown table { display: block; width: 100%; overflow-x: auto; }
 .markdown table th { background: var(--ifm-table-head-background); }
 
 /* interactive figures */
@@ -63,7 +63,7 @@
 .gc-fallback { display: none; }
 
 .gc-toolbar-col { flex-direction: column; align-items: flex-start; }
-.gc-ctrl { display: flex; gap: 10px; align-items: center; }
+.gc-ctrl { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; max-width: 100%; }
 .gc-ctrl .gc-slider { width: 260px; }
 .gc-row-dist { grid-template-columns: 50px 110px 140px 170px 80px 80px 1fr; }
 .gc-readout { font-family: var(--ifm-font-family-monospace); font-size: 0.78rem; font-weight: 600; min-width: 90px; }
@@ -78,6 +78,17 @@
 .gc-tag-join { background: #fee2e2; }
 .gc-tag-none { background: #f3f4f6; color: #6b7280; }
 .gc-action { display: inline-flex; align-items: center; gap: 3px; }
+.gc-operations { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 10px; margin: 12px 0; }
+.gc-operation { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
+.gc-action-cost { font-size: 0.73rem; color: var(--ifm-color-emphasis-700); }
+.gc-operation-wait .gc-action-cost { color: #b91c1c; font-weight: 600; }
+[data-theme="dark"] .gc-operation-wait .gc-action-cost { color: #fca5a5; }
+.gc-retirement { border-left: 3px solid #d97706; padding: 8px 12px; margin: 12px 0; }
+.gc-retirement:not([hidden]) { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.gc-retirement .gc-btn:disabled { opacity: 0.55; cursor: default; }
+.gc-stack-extra { margin-top: 12px; font-size: 0.8rem; }
+.gc-stack-figure { overflow-x: auto; }
+.gc-stack-figure svg { min-width: 640px; }
 
 /* scene diagram: assets and world prototypes */
 .gc-scene { border: 1px solid var(--ifm-color-emphasis-300); border-radius: 12px; padding: 12px 16px; margin: 1em 0 1.2em; background: var(--ifm-background-surface-color); }

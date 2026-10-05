@@ -18,7 +18,7 @@ A kernel launched over indices 0 to `live_count − 1` reads slots 0 to `live_co
 
 The rest of this page is about the second and third layers.
 
-**Virtual address space** is reserved once per `FieldStorage`, as one contiguous range of `capacity × row_stride` bytes rounded up to the driver page, where `capacity` is the planned maximum number of worlds for that prototype. Its base and extent stay fixed until release. Slot *i* of a field is always at `base + i × row_stride`, from the first allocation until close. This is what makes growth compatible with captured graphs: a kernel node captured with a pointer into the storage keeps the same virtual pointer as the population grows, because the pointer was into the reservation, not into whatever happened to be mapped. Only mapped, accessible rows may be touched. Reservation consumes no payload backing; address space, directory metadata and scan costs still limit the plan.
+**Virtual address space** for packed fields is reserved once per `FieldStorage`: `capacity × row_stride` bytes rounded up to a page. Its base and extent stay fixed until release. Slot *i* of a field is at `base + field_offset + i × row_stride`. Growth changes which pages back that address, so captured kernels keep the same pointers. Kernels may only touch mapped, accessible rows. The reservation consumes no payload memory; address space, directory metadata and scan costs still limit capacity.
 
 **Physical memory** is a pool of allocation handles, sized using the granularity queried from CUDA (2 MiB in these figures), created with `cuMemCreate` and mapped into virtual pages with `cuMemMap`. Handles are discrete and interchangeable. A handle freed when the G1 storage shrinks can later back a cartpole page. The physical pages behind one storage need not be contiguous and usually are not. The byte budget counts handles, mapped or spare, and nothing else.
 
@@ -41,7 +41,11 @@ flowchart TB
 
 The figure uses illustrative strides of 1.5 KiB for cartpole and 24 KiB for G1; these are not complete engine-memory measurements. Each storage reserves 32 MiB of addresses, so the two reserve 64 MiB against a shared 32 MiB physical budget. The figure starts with a warm pool for clarity. The package itself creates backing on demand and reuses returned handles.
 
-The figure keeps the two layers apart. Growth draws a handle from the pool, or creates one if budget allows, and maps it into the next virtual page. Fresh addresses need no explicit reader join; historical remapping requires maintenance. The shrink animation withdraws a tail, waits for simulated reader completion, then reclaims it to the pool. Driver work still has a cost. The virtual ranges remain fixed until close.
+Growth takes a physical block from the pool and maps it at the next virtual address. If the pool is empty, the package may allocate a block within the budget. Mapping new addresses can overlap existing GPU work; remapping previously used addresses requires proof that earlier users have finished.
+
+Shrinking first stops new users entering the range, then unmaps it after earlier GPU work finishes. The two-step API checks completion without making the CPU wait for the GPU. Unmapping itself is still a CPU driver call with a cost. The virtual addresses do not change.
+
+**Keeping pages avoids unmapping and remapping them.** Reclaim when another prototype needs the backing. Trim the pool to reduce retained GPU memory. Pages awaiting unmap and blocks in the pool both still occupy physical memory.
 
 ## What follows from the split
 
@@ -50,7 +54,7 @@ The figure keeps the two layers apart. Growth draws a handle from the pool, or c
 | Virtual range is fixed | Field arrays, bound views and captured kernel nodes hold stable pointers across growth and shrink |
 | Mapping is per page | One illustrative page physically covers 1,365 cartpole rows or 85 G1 rows; readiness can publish a smaller exact prefix |
 | Handles are pooled | Reuse can avoid physical allocation, but remapping and access setup still call the driver; `trim` explicitly releases spares |
-| Budget counts handles | A G1 storage consumes a page every 85 slots, a cartpole storage every 1,365. The same budget holds sixteen times fewer G1 worlds |
+| Budget counts handles | These illustrative strides fit about 85 G1 rows or 1,365 cartpole rows per page; rows may span page boundaries. The same budget holds about sixteen times fewer G1 worlds |
 | Virtual is cheap | Reserve the whole budget for every prototype, so each could hold it alone. What stops the reservation from being larger still is directory metadata and per-batch scan cost, not address space; see below |
 
 ## Why not reserve more

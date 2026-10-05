@@ -6,18 +6,21 @@ sidebar_position: 5
 
 # Tutorial
 
-Eight steps from an empty directory to a graph that follows a changing number of worlds. Every step below was run on an RTX 5090 with released Warp 1.17.0 and CUDA driver 13.0; the printed numbers come from that run.
+Eight steps from an empty directory to a graph that follows a changing number of worlds. This uses the explicit binding API, which supports stock Warp. The example outputs and 2 MiB page calculations come from the earlier RTX 5090 / Warp 1.17.0 run; the snippets include the current admission and transfer checks.
 
-The example uses a single prototype with two Data arrays, `position` and `velocity`, standing in for `qpos` and `qvel`. Nothing changes for real MJWarp arrays except the field list.
+The example uses one prototype with `position` and `velocity` arrays. A physics engine also needs its own state layout, initialization rules and work counts; see [Integration](integration.md).
 
 ## Step 1. Backing
 
 Backing is optional. Without it, `fields.allocate` uses an ordinary Warp allocation and all slots are ready immediately. With it, you reserve virtual address space for the maximum `nworld` and map physical pages as needed.
 
 ```python
+import warp as wp
 from gpu_components import backing, directory, fields
 from gpu_components.field_data import FieldSpec
 
+wp.init()
+wp.set_device("cuda:0")
 CAPACITY = 262144                                      # slots reserved; 2 vec3 fields = 32 bytes per slot
 budget = 2 * 1024**3                                   # total physical pages, in bytes
 pages = backing.prepare(budget, device_ordinal=0)      # requires a current CUDA context
@@ -30,6 +33,7 @@ state = fields.allocate(
     backing=pages,
     initial_ready_count=65536,                         # one 2 MiB page at 32 bytes per slot
 )
+directory.publish_admissible_slots(worlds, (state.ready_rows,))  # allow creates only in backed slots
 print(state.ready_rows, fields.memory_report(state)["mapped_packed_bytes"])   # 65536 2097152
 ```
 
@@ -208,14 +212,15 @@ sequenceDiagram
     Root->>D: publish_admissible_slots
 ```
 
-Shrinking is different. Published slots may have readers in flight, so shrinking, remapping a previously mapped address, and retiring storage go through a maintenance scope that synchronizes the streams you name before any mapping changes:
+For blocking shrink, stop concurrent submissions and join all readers. Withdraw directory admission before shrinking storage, so future creates cannot enter the released tail:
 
 ```python
 with backing.maintenance(pages, streams=(wp.get_stream().cuda_stream,)):
+    directory.withdraw_admissible_slots(worlds, (60000,))  # rejects if the tail still contains live worlds
     fields.resize_backing(state, 60000)   # publish lower readiness, then unmap the second page
 ```
 
-Shrinking also rounds to pages: a target of 70000 slots still needs two pages and unmaps nothing, while 60000 slots releases one.
+Shrinking also rounds to pages: a target of 70000 slots still needs two pages and unmaps nothing, while 60000 slots releases one. [Deferred retirement](lineage.md) is the alternative to this blocking path.
 
 ## Step 7. Compaction
 
@@ -227,6 +232,8 @@ moves = worlds.compaction                         # source_slots, destination_sl
 
 plan = fields.prepare_transfer(state, state, ("position", "velocity"))
 fields.transfer(plan, moves.source_slots, moves.destination_slots, moves.count[0:1])
+if int(plan.status.numpy()[0]) != 0:              # readback waits for transfer completion; 0 means success
+    raise RuntimeError("Compaction transfer rejected; do not publish these moves")
 moves.copied_count.assign(moves.count.numpy())    # acknowledge every prototype's moves
 directory.publish_compaction(worlds)              # placement changes; handles do not
 ```

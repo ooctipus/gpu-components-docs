@@ -10,7 +10,7 @@ import TabItem from '@theme/TabItem';
 
 # GPU Components
 
-Device-resident bookkeeping for batch simulations whose set of worlds changes at runtime: a world directory, growable typed storage, virtual-memory backing, and CUDA graph replay driven by GPU-side counts.
+Change the number and kinds of simulated worlds without rebuilding the CUDA graph. GPU Components tracks world locations, stores their data, and shares a memory budget between them.
 
 ## Example
 
@@ -76,7 +76,9 @@ The full list, with the Newton and MuJoCo Warp terms, is on the [vocabulary page
 
 The directory says which slots hold worlds. The virtual range fixes each slot's address. Physical mappings supply memory under those addresses. Create initializes data and publishes a location; compaction copies data and changes locations. Neither requires changing mappings when capacity is already ready. Stale lookup only reads.
 
-The figure shows deferred retirement: **Withdraw tail** lowers permission to use the tail but keeps its pages; **Reclaim** returns the pages after old readers complete. These are separate from the blocking resize API. **Host** means a CPU operation, not a promise of zero latency or no synchronization. Fresh mapping needs no explicit reader wait; historical remapping and joined maintenance do. The virtual ranges stay fixed for their lifetime, through all actions shown.
+**Removing a page takes two steps.** First, stop new work from using it. Earlier GPU work may still need it, so it stays mapped. Once that work finishes, unmap the page and return its memory to the pool. The CPU can submit other work between these steps instead of waiting for the GPU.
+
+The buttons distinguish GPU work, CPU waits, and driver calls. A driver call can take time even when it does not wait for readers. The drawing uses simplified sizes.
 
 <Tabs groupId="scene" queryString="scene">
 <TabItem value="cartpole" label="cartpole and G1" default>
@@ -90,6 +92,14 @@ The figure shows deferred retirement: **Withdraw tail** lowers permission to use
 
 </TabItem>
 </Tabs>
+
+### Why stop using a page before unmapping it?
+
+An empty world slot does not prove that every earlier GPU operation has finished accessing its memory. Unmapping immediately would be unsafe. A blocking resize waits for those operations; the two-step path lets the CPU return and check later.
+
+While the page is closing, new worlds can use the remaining available slots. The closing page still counts against the memory budget and cannot back another prototype until it is unmapped. If the memory will be needed again soon, leave it available instead of shrinking.
+
+The API calls these steps `withdraw_backing` and `reclaim_backing`. Reclaim checks completion **and then unmaps**; it is not a different kind of unmap. Before unmapping starts, cancellation can keep the pages. Restoring their readiness and directory admission then permits new worlds without remapping.
 
 ## Resets under a memory budget
 
