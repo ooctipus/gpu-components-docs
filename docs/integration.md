@@ -85,6 +85,8 @@ qLD = wp.empty(
 
 **What changed:** `qLD` now names the world count explicitly. `empty_like(d.qLD)` would only carry the existing array's capacity; the explicit shape preserves the changing count's identity. The device is also explicit. This is still an ordinary Warp allocation at its point of use.
 
+For example, the logical work shape can be **`(n, 80)`**, with `n` changing from 600 to 900, while the reserved array shape stays **`(4096, 80)`**. `d.nworld` identifies that changing count; `d.qLD.shape[0]` only gives the capacity. Backing must be ready before operations use the additional rows. Our current allocation-capture API rejects `empty_like` because it cannot preserve this relationship; the longer spelling is an API limitation, not a mathematical requirement of growable memory.
+
 The allocation keeps the original inner dimensions. MJWarp owns those shapes and the operations that initialize the values. The same code runs in an ordinary step and in a captured step; there is no temporary-array catalog or storage argument passed through the numerical stages.
 
 <details>
@@ -230,7 +232,7 @@ graph = capture.graph
 
 </div>
 <div>
-<strong className={styles.label}>After · let Newton record the batches</strong>
+<strong className={styles.label}>After · entry point, expanded below</strong>
 
 ```python
 from newton.solvers import (
@@ -246,23 +248,99 @@ graph = mujoco_worlds_capture(
 </div>
 </div>
 
-**The extra setup moves into Newton; it does not vanish.** Newton records reset handling, the count updates and each prototype's physics. The application sends create or replace requests through `commands` and replays the resulting graph with `wp.capture_launch(graph)`. For the Cartpole/G1 diagram, one recorded program covers both batches as their populations change. The same applies to the two banana/Franka scenes.
+### Inside `mujoco_worlds_capture`
 
-The keyboard task also supplies action and reset callbacks. Its `application_bindings` declarations and memory-growth service remain part of integration; the short call above does not replace them.
+**The right-hand call records a larger program than the left-hand loop.** It combines world replacement, state movement and physics. The shorter call is an application interface; it is not a measure of how much integration code exists.
 
-Newton's `MuJoCoWorlds` connects the pieces. `mujoco_worlds_prepare` starts with each prototype's model and one-world Data template. It allocates persistent state using MJWarp's field layouts, defaults and state-transfer rules. `mujoco_worlds_capture` then:
+`worlds` holds each prototype's model, state arrays and storage. `commands` holds GPU requests to create, replace or destroy worlds; `results` holds their outcomes and returned handles. Newton connects those resources to GPU Components and records MJWarp's numerical operations through Warp.
 
-1. **Records discovery.** Record reset work and conditional physics to collect typed allocation requests and temporary lifetimes. This discovery graph cannot execute. On CUDA, Warp reserves placeholder addresses without committing the full temporary payload.
-2. **Prepares temporary storage.** Use each request's exact world, contact or CCD count identity to select its storage domain. Fixed-size control arrays remain fixed. Pack fields and reuse storage only across proven ordered lifetimes.
-3. **Records the final program.** Record the same reset and physics program with the prepared allocation bindings. Each ordinary `wp.empty` returns its assigned array before the numerical code uses it.
-4. **Binds and publishes the graph.** Check native descriptors, storage readiness and count-update ordering, connect recorded operations to their count sources, then instantiate and upload the graph.
+There are two separate jobs: **build the graph during setup**, then **execute its recorded operations on every replay**.
 
-Discovery happens during preparation, not at each reset. The task first warms the kernels with an ordinary `mjw.step(model, warm)` on separate Data. Discovery still needs driver resources and address space; it does not remove the final storage budget.
+#### During setup: discover, allocate, record again
+
+Before this call, `mujoco_worlds_prepare` has allocated the persistent physics state from one-world prototype templates. The task has warmed the kernels on separate Data. The capture function then:
+
+1. **Records a discovery graph.** Record the reset and physics program shown below. Custom Warp collects temporary allocation requests and their uses. This graph cannot execute; discovery reserves placeholder addresses without backing the full scratch payload.
+2. **Prepares scratch storage.** Newton groups requests by their world, contact or CCD count. GPU Components provides the storage. Warp checks operation ordering before Newton assigns the same bytes to different temporaries.
+3. **Records the same program again.** Supply the prepared arrays at the numerical code's `wp.empty` calls. This is the graph that will run.
+4. **Connects and checks the graph.** Bind changing counts to recorded operations, check memory readiness and count-update ordering, retain the arrays and task buffers, then instantiate and upload the executable.
+
+This is setup work. It is not repeated for every reset or control step.
+
+#### During replay: reset work comes before physics
+
+For the Cartpole/G1 example, B's reset changes the two populations from **3 + 1** to **2 + 2**. The graph first finishes the reset and any movement of continuing worlds, then updates the recorded work sizes. The two physics batches can run as independent graph branches. Each batch's eight substeps remain ordered.
+
+```mermaid
+flowchart TB
+    request["Read command sequence"] -->|Reset needed| change["Initialize → publish handles<br/>Compact → publish moved locations"]
+    request -->|No reset needed| counts["Invalidate processed-batch contacts<br/>update work sizes and check readiness"]
+    change --> counts
+    counts -->|Allowed| a["Cartpole batch · 2 worlds<br/>8 ordered MJWarp substeps"]
+    counts -->|Allowed| b["G1 batch · 2 worlds<br/>8 ordered MJWarp substeps"]
+    a --> done["Complete physics and pose updates"]
+    b --> done
+```
+
+The same graph structure applies to the two banana/Franka scenes. Independent branches permit overlap; they do not guarantee simultaneous execution. A healthy replay with no new request sequence skips reset work. A failed request or failed graph update suppresses physics and pose refresh. Physical page mapping and unmapping happen outside this graph, through the memory service described below.
+
+Here is the recorded program expanded into **pseudocode**. `parallel` means sibling paths in the CUDA graph, not a Python loop that runs on every replay. Conditions are evaluated on the GPU. Error guards are summarized on the final check line.
+
+```text
+begin command batch
+if reset work is needed:
+    validate requests, then admit those that fit
+    parallel for each prototype:
+        copy defaults into admitted destination rows
+        apply task reset values, if supplied
+        acknowledge completed initialization
+    publish successful replacements and their handles
+
+    plan moves to fill holes left by removed worlds
+    parallel for each prototype:
+        copy continuing state to the planned destinations
+        acknowledge completed moves
+    publish the moved worlds' locations
+
+invalidate contact caches if a command batch was processed
+update recorded launches from the current GPU counts
+check errors, required backing and permission to advance
+
+parallel for each prototype:
+    if this batch is allowed to advance:
+        apply its action callback, if supplied
+        repeat 8 times, in order:
+            mjw.step(model, execution_data)
+            run its contact callback, if supplied
+    refresh poses if enabled and the batch is eligible
+```
+
+**Publishing replacements and publishing moved locations are separate operations.** B gets a new world after its reset state is ready. C keeps its state if compaction moves it. Physics starts only after the initialization, movement and count-update work has completed.
+
+The actual native-step recording inside Newton still calls ordinary MJWarp code:
+
+```python title="worlds.py — excerpt from _record_physics"
+record_callback(group.before_step)
+for _ in range(group.substeps):
+    _validate_population(group)
+    region = wp.capture_transient(
+        lambda: mjw.step(group.model, group.execution_data),
+        assume_nonescaping=True,
+        assume_no_indirect_access=True,
+    )
+    if region is not None:
+        native_regions.append(region)
+    record_callback(group.after_substep)
+```
+
+Here, `capture_transient` gives Warp the temporary lifetime described earlier. Newton places this code inside the batch's GPU condition. GPU Components' `capture_parallel` records the independent prototype branches; its `record_update` operations update their recorded work sizes before those branches run.
+
+The keyboard task supplies its own action and reset callbacks. Their `application_bindings` declarations and the memory-growth service remain part of integration; neither is implemented by `mjw.step`.
 
 <details>
 <summary>The allocation-capture APIs inside Newton</summary>
 
-This outline shows the Warp calls used by Newton. `record_program()` stands for the same lifecycle, conditional physics and parallel-population program in both passes. Newton's field allocation and binding preparation are omitted.
+This shortened outline shows the two capture passes. `record_program()` below stands for the **expanded GPU program above**, including its conditions and parallel branches; it is an explanatory name, not a separate public API.
 
 ```python
 with wp.ScopedCapture(
@@ -286,11 +364,13 @@ with wp.ScopedCapture(
     record_program()
 ```
 
-At final capture end, Warp rechecks the allocation sequence, descriptors and overlap ordering against the final graph, including node identities and recorded native kernel packets. Distinct occurrences use distinct array descriptors even when they share backing. Newton keeps the storage alive for the executable and validates its native model and Data descriptors around application callbacks. Binding preparation preserves the proved topology and pointer arguments; the published count updater exclusively owns subsequent node updates. Arbitrary external native graph edits are outside this integration's contract.
+The discovery pass omits the executable's count-updater operations. The final pass records them, and GPU Components connects the discovered count identities to their GPU sources. Warp rechecks the allocation sequence, descriptors and reuse ordering against the final graph. Newton validates native model and Data descriptors around callbacks and keeps the storage alive for the executable.
 
-The same three count objects remain authoritative throughout preparation. A world count and a collision count stay different even if they have equal maxima. GPU Components' `adopt_launches` connects native records to their exact count sources; memory-operation validation also checks the admitted storage. Task callbacks still declare their own recorded launches through Newton's `application_bindings` interface. Recording callbacks run twice and must reproduce their operation structure without host side effects or callback-owned allocations.
+`adopt_launches` binds native records to their exact count sources. Task callbacks still declare their recorded launches through `application_bindings`. Recording callbacks run twice and must reproduce their operation structure without host side effects or callback-owned allocations. External edits to the prepared native graph are outside this integration's contract.
 
 </details>
+
+[Read the actual capture function](https://github.com/ooctipus/newton/blob/69f47697e6810bfd74c28182443f3f8c1ca643b1/newton/_src/solvers/mujoco/worlds.py#L886) and [its native-physics recorder](https://github.com/ooctipus/newton/blob/69f47697e6810bfd74c28182443f3f8c1ca643b1/newton/_src/solvers/mujoco/worlds.py#L510).
 
 ### Why are there three counts?
 
