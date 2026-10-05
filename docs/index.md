@@ -76,7 +76,7 @@ The full list, with the Newton and MuJoCo Warp terms, is on the [vocabulary page
 
 The directory says which slots hold worlds. The virtual range fixes each slot's address. Physical mappings supply memory under those addresses. Create initializes data and publishes a location; compaction copies data and changes locations. Neither requires changing mappings when capacity is already ready. Stale lookup only reads.
 
-**Removing a page takes two steps.** First, stop new work from using it. Earlier GPU work may still need it, so it stays mapped. Once that work finishes, unmap the page and return its memory to the pool. The CPU can submit other work between these steps instead of waiting for the GPU.
+**Removing unused pages takes two steps.** “Stop using tail” closes all fully unused trailing pages. Earlier GPU work finishes automatically in this illustration; the pages stay mapped. Then “Unmap” returns them to the pool. In the real system, completion is checked through GPU events, not a timer.
 
 The buttons distinguish GPU work, CPU waits, and driver calls. A driver call can take time even when it does not wait for readers. The drawing uses simplified sizes.
 

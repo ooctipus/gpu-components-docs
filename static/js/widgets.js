@@ -664,7 +664,7 @@
     const granulesUsed = () => granulesMapped() + S.pool;
     function create(k) {
       const p = P[k], free = freeSlots(k);
-      if (!free.length) { say(`${p.name}: no available slot. ${S.pending[k] ? "The closing page cannot receive new worlds. Finish the earlier GPU work, then keep and reopen it or unmap it." : "Map more pages first."}`, true); render(); return; }
+      if (!free.length) { say(`${p.name}: no available slot. ${S.pending[k] ? "The closing pages cannot receive new worlds. Once earlier GPU work finishes automatically, reopen them or unmap them." : "Map more pages first."}`, true); render(); return; }
       const slot = S.dense[k] ? free[0] : free[(S.seq * 7919 + free.length * 31) % free.length];
       const id = S.nextId++; S.gen[id] = 1; S.rows[k][slot] = { id, gen: 1 }; S.dense[k] = false; S.seq += 1;
       say(`CREATE ${p.name} world ${id} in slot ${slot}. The task initializes the payload and publishes its directory entry; the slot address and mappings stay unchanged.`); render();
@@ -692,27 +692,34 @@
       say(`${p.name}: mapped ${need} page(s)${fromPool ? ` from the pool (${fromPool})` : ""}${fresh ? `; allocated ${fresh} new block(s)` : ""} and made their slots available. ${historical ? "This drawing uses a CPU wait before remapping previously used addresses." : "Mapping these new addresses can overlap existing GPU work."} Map and access-permission calls still cost CPU time.`); render();
     }
     function withdraw(k) {
-      const p = P[k], need = 1;
-      if (S.pending[k]) { say(`${p.name}: a page is already closing. Finish or cancel that unmap first.`, true); return; }
-      const newReady = Math.max(0, Math.floor(((S.mapped[k] - need) * GU) / p.bytes));
-      if (S.mapped[k] - need < 0 || (live(k) > 0 && S.rows[k].slice(newReady).some(Boolean))) { say(`${p.name}: cannot withdraw slots that hold live worlds. Destroy or compact first.`, true); return; }
-      S.pending[k] = { pages: need, complete: false };
-      say(`${p.name}: stop new work in slots ${newReady} and above. The CPU queues this change and returns. The GPU must finish earlier accesses first; ${need} page(s) stay mapped and still use the budget. New worlds may use the remaining available slots.`); render();
+      const p = P[k];
+      if (S.pending[k]) { say(`${p.name}: pages are already closing. Unmap or reopen them after earlier GPU work finishes.`, true); return; }
+      const lastOccupiedEnd = S.rows[k].reduce((end, h, slot) => h ? slot + 1 : end, 0);
+      const keptPages = Math.ceil(lastOccupiedEnd * p.bytes / GU), need = S.mapped[k] - keptPages;
+      if (need <= 0) {
+        const canCompact = Math.ceil(live(k) * p.bytes / GU) < S.mapped[k];
+        say(`${p.name}: ${S.mapped[k] ? "no whole trailing page is unused." : "no pages are mapped."}${canCompact ? " Compact worlds first to free the tail." : S.mapped[k] ? " Pages containing world data must stay mapped." : ""}`); return;
+      }
+      const newReady = Math.min(p.cap, Math.floor(keptPages * GU / p.bytes));
+      const pending = { pages: need, complete: false }; S.pending[k] = pending;
+      say(`${p.name}: closing all ${need} unused trailing page(s). New worlds use slots below ${newReady}; the closing pages stay mapped until Unmap. Earlier GPU work finishes automatically in this animation.`); render();
+      // Illustrative completion delay, not measured GPU time. Reset/re-init invalidates this request.
+      setTimeout(() => {
+        if (!figure.isConnected || S.pending[k] !== pending) return;
+        pending.complete = true;
+        if (S.sel === k) say(`${p.name}: earlier GPU work finished. Unmap returns all ${need} page(s) to the pool; Reopen keeps them available without remapping.`);
+        render();
+      }, 1200);
     }
     function reclaim(k) {
       const p = P[k]; if (!S.pending[k]) { say(`${p.name}: no page is waiting to be unmapped.`, true); return; }
-      if (!S.pending[k].complete) { say(`${p.name}: not ready yet. Earlier GPU work has not finished. This check returns immediately; no page is unmapped.`, true); return; }
+      if (!S.pending[k].complete) { say(`${p.name}: earlier GPU work is still finishing automatically. This check returns immediately; click Unmap when ready.`); return; }
       const need = S.pending[k].pages; S.pending[k] = null; S.mapped[k] -= need; S.pool += need;
       say(`${p.name}: earlier GPU work is complete. Unmapped ${need} page(s); their memory is now in the pool for another prototype. The CPU calls cuMemUnmap without a reader wait. That driver call still takes time.`); render();
     }
-    function finishReaders(k) {
-      if (!S.pending[k]) return;
-      S.pending[k].complete = true;
-      say(`${P[k].name}: earlier GPU work has finished. The remaining worlds can run while the CPU unmaps the unused pages. Or keep and reopen the pages to avoid unmapping.`); render();
-    }
     function reopen(k) {
       if (!S.pending[k]) { say("There is no pending unmap to cancel.", true); return; }
-      if (!S.pending[k].complete) { say("Cancellation also checks completion. Earlier GPU work has not finished; try again later.", true); return; }
+      if (!S.pending[k].complete) { say("Earlier GPU work is still finishing automatically. Click Reopen when ready; this check does not wait."); return; }
       S.pending[k] = null;
       say(`${P[k].name}: cancelled the unmap, then restored readiness and directory admission. New worlds can use the pages again. No unmap, remap or physical allocation.`); render();
     }
@@ -732,7 +739,7 @@
           const rect = svg("rect", { x, y: y + 15, width: sw - 3, height: 22, rx: 3, fill: h ? p.color : "#ffffff", stroke: h ? (r >= lv ? C.outside : "#1f2937") : "#d1d5db", "stroke-width": h && r >= lv ? 2.5 : 1, class: h ? "gc-clickable" : "", onclick: () => destroy(k, r) });
           if (h) rect.appendChild(svg("title", { text: `world ${h.id}, generation ${h.gen}. Click to destroy.` }));
           s.appendChild(rect);
-          if (h) s.appendChild(svg("text", { x: x + (sw - 3) / 2, y: y + 29, "text-anchor": "middle", "font-size": 9.5, fill: "white", text: `${h.id}·g${h.gen}` }));
+          if (h) s.appendChild(svg("text", { x: x + (sw - 3) / 2, y: y + 29, "text-anchor": "middle", "font-size": 9.5, "pointer-events": "none", fill: "white", text: `${h.id}·g${h.gen}` }));
         }
         s.appendChild(svg("text", { x: 16, y: y + 53, "font-size": 11, fill: C.muted, text: "addresses · unchanged" }));
         s.appendChild(svg("rect", { x: x0, y: y + 42, width: p.cap * sw - 3, height: 16, rx: 3, fill: "#f8fafc", stroke: "#1f2937" }));
@@ -762,8 +769,7 @@
       chips.forEach((c, k) => c.classList.toggle("gc-btn-primary", k === S.sel));
       const pending = S.pending[S.sel];
       progress.hidden = !pending;
-      progressText.textContent = pending?.complete ? "GPU finished. The pages can now be unmapped or reopened." : "Earlier GPU work is still using the old range. The CPU is free to submit other work.";
-      finishButton.disabled = !pending || pending.complete;
+      progressText.textContent = pending?.complete ? `Ready: Unmap returns ${pending.pages} page(s) to the pool; Reopen keeps them.` : "Earlier GPU work is finishing… This animation advances automatically; the delay is illustrative.";
       const historical = S.mapped[S.sel] < S.highWater[S.sel];
       mapAction.querySelector(".gc-wait-dot").hidden = !historical;
       mapAction.title = historical ? "Previously used addresses: this drawing waits for readers before remapping, then publishes GPU counts." : "New addresses: CPU map and access-permission calls can overlap GPU work; GPU counts are published afterward.";
@@ -791,13 +797,12 @@
       act("Create", create, "GPU", "Initialize the new world's data and update the directory. Cost depends on initialized bytes and directory work."),
       act("Compact", compact, "GPU", "Scan slots and copy worlds into holes. Cost depends on slot capacity and bytes moved."),
       mapAction,
-      act("Stop using tail", withdraw, "CPU+GPU", "Stop new accesses to the last page: scan slots, update counts and order GPU readers. No payload copy or CPU wait."),
+      act("Stop using tail", withdraw, "CPU+GPU", "Stop new accesses to all wholly unused trailing pages. Partially used pages stay mapped. Scan slots, update counts and order GPU readers; no payload copy or CPU wait."),
       unmapAction,
       act("Reopen", reopen, "CPU+GPU", "Poll completion, cancel the pending unmap, then restore readiness and admission. No payload copy, remap or CPU wait in this illustration."),
     ]));
     const progressText = el("span", {});
-    const finishButton = button("Finish earlier GPU work (simulate)", () => finishReaders(S.sel));
-    progress.append(progressText, finishButton);
+    progress.append(progressText);
     root.appendChild(progress);
     root.appendChild(figure); root.appendChild(stats); root.appendChild(note);
     const extra = el("details", { class: "gc-stack-extra" }, [el("summary", { text: "Other actions and drawing scale" })]);

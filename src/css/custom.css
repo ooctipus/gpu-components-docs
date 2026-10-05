@@ -83,7 +83,6 @@
 .gc-action-cost { font-size: 0.73rem; color: var(--ifm-color-emphasis-700); }
 .gc-retirement { border-left: 3px solid #d97706; padding: 8px 12px; margin: 12px 0; }
 .gc-retirement:not([hidden]) { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
-.gc-retirement .gc-btn:disabled { opacity: 0.55; cursor: default; }
 .gc-stack-extra { margin-top: 12px; font-size: 0.8rem; }
 .gc-stack-figure { overflow-x: auto; }
 .gc-stack-figure svg { min-width: 640px; }
