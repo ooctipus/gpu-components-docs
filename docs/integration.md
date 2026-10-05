@@ -15,7 +15,9 @@ import TabItem from '@theme/TabItem';
 
 We prepare each scene in advance. The rest of these docs use Cartpole and G1, or scenes built from bananas and Frankas. Each prepared scene is a *world prototype*. Worlds using the same prototype share a batch of physics arrays.
 
-This page follows one reset using those same examples, then shows the [physics changes](#physics-code), [Newton's setup](#newton-setup) and [IsaacLab MDP code](#isaaclab-mdp). The scene diagrams explain the relationships; the code excerpts come from the working keyboard integration at the [published commits below](#source-snapshot).
+This page follows one reset using those same examples, then shows the [physics code](#physics-code), [Newton's setup](#newton-setup) and [IsaacLab MDP code](#isaaclab-mdp). The scene diagrams explain the relationships; the code comes from the keyboard implementation at the [published commits below](#source-snapshot), updated October 4, 2026.
+
+**The full application diff is broader than the integration.** Reading and resetting worlds through their handles is part of the task integration. Keyboard generation, typing rewards and command-scheduling optimizations are application choices. They appear in the same IsaacLab branch, but another task does not need to copy them.
 
 ## Follow one reset
 
@@ -42,54 +44,80 @@ Here is who does what:
 
 - **IsaacLab** chooses B's new scene, computes its reset state, and produces actions, observations and rewards.
 - **Newton** checks that there is room, initializes B's new world, preserves continuing worlds, and runs physics.
-- **MJWarp** computes contacts, forces and motion for each batch.
+- **MJWarp** computes contacts, forces and motion, and defines the layout, initialization and transfer semantics of its numerical state.
 - **GPU Components** manages the GPU memory and the lookup from a world handle to its current row.
-- **Custom Warp** lets the recorded GPU operations use changing batch counts.
+- **Custom Warp** records typed allocations and GPU operations, and lets the recorded operations use changing batch counts.
 
 A *CUDA graph* is the recorded sequence of GPU operations. Here, the sequence stays recorded while the counts change from 3 and 1 worlds to 2 and 2.
 
 ## MJWarp and Warp: temporary arrays and world counts {#physics-code}
 
-Two parts need to change for a physics step to run with a changing number of worlds: how it obtains temporary arrays, and how it decides how much work to launch.
+The numerical step uses ordinary Warp arrays and launches. Newton supplies storage during capture and connects each changing count to its GPU source. MJWarp has no dependency on GPU Components.
 
 ### Reuse temporary arrays
 
-*Scratch* means temporary working memory, such as an intermediate matrix used while solving a step. A numerical stage asks for an array where it needs it:
+*Scratch* means temporary working memory, such as an intermediate matrix used while solving a step. The numerical stage allocates it where it is needed:
 
-```python title="Ordinary allocation"
-qDeriv = wp.empty((d.nworld, m.nC), dtype=float)
+```python title="MJWarp forward.py"
+qDeriv = wp.empty((d.nworld, m.nC), dtype=float, device=d.qpos.device)
+derivative.deriv_smooth_vel(m, d, qDeriv)
 ```
 
-The shape means one row per world, with `m.nC` values in each row. The chosen model determines that row width. The integrated version adds a name so that setup can allocate the array in advance:
+The shape means one row per world, with `m.nC` values in each row. MJWarp owns that shape and the operations that initialize the values. The same code runs in an ordinary step and in a captured step; there is no temporary-array catalog or storage argument passed through the numerical stages.
 
-```python title="Current MJWarp forward.py"
-from gpu_components.scratch import scratch_array
+During discovery, custom Warp records each `wp.empty` request with its shape, type and exact count identities. Newton prepares the final arrays, then records the program again with those arrays supplied at the allocation calls. Substitution happens before views, strides and kernel arguments are constructed. Graph replay executes the recorded operations without running Python allocation calls again.
 
-qDeriv = scratch_array(d.scratch, "implicit.qDeriv", (d.nworld, m.nC), float)
+Newton marks each complete native step as a temporary lifetime:
+
+```python title="Newton worlds.py — inside the physics callback"
+wp.capture_transient(
+    lambda: mjw.step(group.model, group.execution_data),
+    assume_nonescaping=True,
+    assume_no_indirect_access=True,
+)
 ```
 
-`scratch_array` belongs to GPU Components. During setup it records the requested name, shape and type. When Newton records the final physics step, it returns the array already assigned to that name. Replaying the graph uses that same array; Python does not run the request again.
+The two flags promise that temporary arrays stay inside this call and that their accesses are visible to Warp. The numerical code must initialize the values it needs on every execution. Persistent Data is prepared outside the call.
 
-For ordinary execution, `d.scratch` is `None` and the helper calls `wp.empty`. This choice is implemented once inside the helper. Stages do not need their own `if workspace is None` branches.
+**Two arrays can share memory only after all uses of the first have finished.** The arrays can have identical shapes and still need separate storage if their operations overlap.
+
+<details>
+<summary>How Warp checks whether temporary memory can be reused</summary>
+
+Every temporary access must be visible through recorded regular-array operands, including struct fields and ordinary views that retain their parent. Hidden pointer tables or exported raw pointers do not satisfy this contract. Warp checks the recorded uses and graph ordering; it does not infer arbitrary memory accesses or prove initialization.
+
+Each allocation occurrence keeps its own descriptor. Newton first selects compatible requests by exact count identity, type and shape. Warp then proves that **every use of the earlier allocation completes before every use of the later allocation**. This permits reuse within one step as well as between successive steps. Equal shapes alone never establish a safe lifetime.
+
+The proof uses actual GPU completion edges and adds no synchronization. A use inside a conditional or loop counts as a use of the whole containing node; shared nodes and parallel siblings cannot establish the required order. Unknown native operations disable reuse within that region. The coarser proof that one complete region precedes another remains available under the nonescape contract.
+
+</details>
+
+### Collision storage in the current integration
+
+With sleeping enabled, MJWarp records an initial collision pass and a second pass after updating which bodies are awake. Both passes are inside one native-step region. The earlier whole-region-only planner retained two scratch sets; the allocation-use proof now permits sharing when all first-pass uses finish before the second pass uses the same bytes. MJWarp keeps its ordinary allocations and numerical sequence.
+
+Each allocation still returns a distinct array descriptor, even when the two passes safely share physical storage.
+
+Address-only discovery avoids materializing temporary allocation occurrences during preparation. The final layout still needs physical backing for persistent state and its planned temporary slots. Mapping granularity, readiness and spare backing also contribute to the memory budget.
 
 ### Use the current count on each replay
 
 The velocity update computes `velocity += timestep * acceleration`. Its launch has one thread per world and velocity coordinate (`m.nv`):
 
-```python title="Current MJWarp forward.py"
+```python title="MJWarp forward.py"
 wp.launch(
     _next_velocity, dim=(d.nworld, m.nv),
     inputs=[m.opt.timestep, d.qvel, qacc, 1.0], outputs=[d.qvel],
 )
 ```
 
-For an ordinary step, `d.nworld` is an integer. For a recorded, changing-size step, Newton passes `workspace.execution_data`, where `nworld` is a custom Warp `CountParameter`. It names a changeable count and states its maximum. GPU Components connects it to the GPU integer holding the current world count.
+For an ordinary step, `d.nworld` is an integer. For a recorded, changing-size step, Newton passes `group.execution_data`, where `nworld` is a custom Warp `CountParameter`. It names a changeable count and states its maximum. Allocation records retain that identity, and GPU Components connects recorded operations to the GPU integer holding the current world count.
 
 In the example above, the first scene's launch processes three worlds before reset and two afterward. An update operation reads the count and changes the recorded launch size before physics runs. This does not record a new graph.
 
-Array shapes still describe their maximum reserved size. Copying the entire array would therefore be wrong. The custom Warp `extent` argument says how much to copy:
+The final array descriptors describe their maximum reserved size. Copying the entire array would therefore be wrong. The custom Warp `extent` argument says how much to copy:
 
-```python title="Current MJWarp forward.py"
+```python title="MJWarp forward.py"
 wp.copy(d.qacc_warmstart, d.qacc, extent=(d.nworld, *d.qacc_warmstart.shape[1:]))
 ```
 
@@ -97,54 +125,45 @@ This saves the current worlds' accelerations for use in the next step. It leaves
 
 ## Newton: prepare the arrays and record the step {#newton-setup}
 
-Newton's `MuJoCoWorlds` connects the pieces. For each prototype, it starts with a model and a one-world Data template, then:
+Newton's `MuJoCoWorlds` connects the pieces. `mujoco_worlds_prepare` starts with each prototype's model and one-world Data template. It allocates persistent state using MJWarp's field layouts, defaults and state-transfer rules. `mujoco_worlds_capture` then:
 
-1. **Finds the temporary arrays.** Record a step to collect its `scratch_array` requests, then discard that recording without running it.
-2. **Allocates storage.** Put persistent physics fields and temporary fields in the appropriate world, contact or collision-work arrays.
-3. **Connects the arrays to the step.** Match each scratch name to its allocated array and check the shapes, types and memory ownership.
-4. **Records the final program.** Record reset work and physics, connect the changing counts to the recorded operations, then prepare the graph for replay.
+1. **Records discovery.** Record reset work and conditional physics to collect typed allocation requests and temporary lifetimes. This discovery graph cannot execute. On CUDA, Warp reserves placeholder addresses without committing the full temporary payload.
+2. **Prepares temporary storage.** Use each request's exact world, contact or CCD count identity to select its storage domain. Fixed-size control arrays remain fixed. Pack fields and reuse storage only across proven ordered lifetimes.
+3. **Records the final program.** Record the same reset and physics program with the prepared allocation bindings. Each ordinary `wp.empty` returns its assigned array before the numerical code uses it.
+4. **Binds and publishes the graph.** Check native descriptors, storage readiness and count-update ordering, connect recorded operations to their count sources, then instantiate and upload the graph.
 
-Discovery happens at startup, not at each reset. The task first warms the kernels with an ordinary `mjw.step(model, warm)`.
+Discovery happens during preparation, not at each reset. The task first warms the kernels with an ordinary `mjw.step(model, warm)` on separate Data. Discovery still needs driver resources and address space; it does not remove the final storage budget.
 
 <details>
-<summary>The actual setup APIs, in order</summary>
+<summary>The allocation-capture APIs inside Newton</summary>
 
-These are shortened excerpts from Newton's `worlds.py`; field enumeration and memory allocation are omitted.
+This outline shows the Warp calls used by Newton. `record_program()` stands for the same lifecycle, conditional physics and parallel-population program in both passes. Newton's field allocation and binding preparation are omitted.
 
 ```python
-# 1. Find scratch requests. The three count objects describe worlds,
-#    contact-buffer entries, and CCD work-buffer entries.
-registry, counts = mjw.discover_step_scratch(
-    model, template,
-    world_capacity=world_capacity,
-    contact_capacity=contact_capacity,
-    ccd_capacity=ccd_capacity,
-)
+with wp.ScopedCapture(
+    record_launches=True,
+    record_memory_operations=True,
+    record_allocations=True,
+) as discovery:
+    record_program()
 
-# 2. Add scratch to the field lists used for allocation.
-for count, specs in zip(counts, (world_fields, contact_fields, ccd_fields), strict=True):
-    specs.extend(
-        replace(spec, name="scratch." + spec.name)
-        for spec in scratch_ops.column_specs(registry, count)
-    )
+requests = wp.capture_get_allocations(discovery.graph)
+# Newton selects candidate_pairs by exact count domain, dtype and shape.
+ordered = wp.capture_allocation_order(discovery.graph, candidate_pairs)
+# Newton prepares bindings: one (original request, final array) pair per occurrence.
+# A pair may share backing only when its ordering result is True.
 
-# Allocate the arrays here. `columns` maps each scratch name to its array.
-
-# 3. Connect all arrays before recording the final step.
-scratch_ops.prepare(registry, columns)
-bindings = mjw.StepBindings(
-    world_storage, contact_storage, ccd_storage,
-    fixed_arrays=plain_arrays,
-)
-workspace = mjw.make_step_workspace(
-    model, data, bindings=bindings,
-    scratch=registry, count_parameters=counts,
-)
+with wp.ScopedCapture(
+    record_launches=True,
+    record_memory_operations=True,
+    allocation_bindings=bindings,
+) as final:
+    record_program()
 ```
 
-`workspace` holds references to the model, Data, counts and storage. It checks that these still match when recording. It does not allocate a second set of temporary arrays. The numerical call is still `mjw.step(model, workspace.execution_data)`.
+At final capture end, Warp rechecks the allocation sequence, descriptors and overlap ordering against the final graph, including node identities and recorded native kernel packets. Distinct occurrences use distinct array descriptors even when they share backing. Newton keeps the storage alive for the executable and validates its native model and Data descriptors around application callbacks. Binding preparation preserves the proved topology and pointer arguments; the published count updater exclusively owns subsequent node updates. Arbitrary external native graph edits are outside this integration's contract.
 
-The setup keeps the same three count objects throughout. A world count and a collision count remain different even if both happen to have a maximum of 4096. After capture, `bind_step_program` connects the recorded operations to their counts and verifies that count updates precede physics. Newton then instantiates and uploads the graph.
+The same three count objects remain authoritative throughout preparation. A world count and a collision count stay different even if they have equal maxima. GPU Components' `adopt_launches` connects native records to their exact count sources; memory-operation validation also checks the admitted storage. Task callbacks still declare their own recorded launches through Newton's `application_bindings` interface. Recording callbacks run twice and must reproduce their operation structure without host side effects or callback-owned allocations.
 
 </details>
 
@@ -156,7 +175,7 @@ A physics step has several kinds of work. One count cannot describe all of them:
 - **Contact-buffer entries:** how much contact-buffer space is safe to access. This can exceed the number of contacts produced in a step.
 - **CCD work-buffer entries:** space for convex collision detection.
 
-In code, world operations use `world_storage.protected_count`, which points to the directory's live count. Contact and CCD operations use their storage's `ready_count`, the number of usable rows. Actual contact totals have separate counters, such as `data.nacon`.
+World operations use `world_storage.protected_count`, which points to the directory's live count. Newton publishes separate `contact_count` and `ccd_count` values over the prefixes that are ready across every owner in the corresponding domain. A temporary field cannot authorize more rows than its physical backing supports. Actual contact totals have separate counters, such as `data.nacon`.
 
 ### What gets copied at reset?
 
@@ -164,29 +183,35 @@ For **B's new episode**, Newton copies the prototype's default physics state and
 
 For **continuing C**, Newton copies its existing physics state if it needs to move C to fill a hole. The code calls this *compaction*.
 
-**Temporary scratch is not copied in either case.** Each numerical stage clears, copies or overwrites its temporary values before using them. Sharing storage with physics state does not make a temporary part of the episode state. The supported physics features still need checks that they write those values before reading them.
+**Temporary scratch is not copied in either case.** Each numerical stage clears, copies or overwrites its required temporary values before using them. MJWarp's native state-transfer rules preserve continuing-world state, including warm starts, while Newton owns the placement and publication sequence. Temporary storage participates in readiness and lifetime management without becoming episode state.
 
 ## When does GPU memory grow or shrink?
 
 The example assumes there is already room for B in the second batch. When there is not, Newton must first make more memory usable. Reserving virtual addresses alone does not provide physical GPU memory.
 
-`grow_backing` maps physical memory into more of the reserved address range. When all requested growth uses previously unmapped ranges, it avoids waiting on the CPU for existing readers; GPU stream ordering protects later use. The mapping and permission calls still take CPU time.
+`mujoco_worlds_grow_backing` maps physical memory into more of the reserved address range. Newton grows persistent and temporary storage together, initializes newly usable contact fields from MJWarp's defaults, and publishes only a prefix supported by all required owners. New world state is initialized when admitting the reset requests. Fresh suffix mappings can use GPU stream ordering without joining existing readers on the CPU. The mapping and permission calls still take CPU time.
 
-`resize_backing` can shrink storage. **In this published version, shrinking waits for conflicting GPU work before it unmaps memory.** The caller must account for every stream using that memory and prevent new work from racing with the change. Event-based deferred reclamation and a background mapping thread are not included in this branch.
+`mujoco_worlds_resize_backing` can shrink storage. **Shrinking waits for conflicting GPU work before it unmaps memory.** The caller supplies every stream using that memory and excludes new submissions during the change. Temporary storage follows the same retirement rules as persistent storage.
 
-Memory changes happen outside graph replay. The array's virtual starting address stays fixed, allowing the recorded operations to keep using it. This does not make memory unlimited: creating worlds still requires enough usable storage within the configured budget.
+Memory changes happen outside graph replay. The array's virtual starting address stays fixed, allowing the recorded operations to keep using it. Creating worlds still requires enough usable storage within the configured budget. Closing the population requires retiring its graph and completing all readers before releasing backing.
 
 ## IsaacLab: write the task terms {#isaaclab-mdp}
 
-The working task in this branch uses a robot and keyboards of different sizes. The replacement works like the scene changes above. IsaacLab still owns the MDP: actions, observations, rewards, terminations and resets. The task-local selection API connects those terms to the current physics arrays.
+The working task uses a robot and keyboards of different sizes. The replacement works like the scene changes above. IsaacLab still owns the MDP: actions, observations, rewards, terminations and resets. The task-local selection API connects those terms to the current physics arrays.
+
+For another task, the essential change is to read and write the world currently owned by each environment, and to update that ownership after a reset. The selectors below are this task's implementation of that lookup. Its typing commands, rewards and robot controller remain task code.
 
 ### Choose the joints once
 
 The configuration selects the robot's six joint coordinates and velocities:
 
 ```python title="so101_env_cfg.py — selected terms"
-ROBOT_Q = NewtonSelectorCfg(JOINT_COORD, path=".*/Robot/joints/.*", count_per_world=6)
-ROBOT_QD = NewtonSelectorCfg(JOINT_DOF, path=".*/Robot/joints/.*", count_per_world=6)
+from newton import Model
+
+from .selection_paths import NewtonSelectorCfg
+
+ROBOT_Q = NewtonSelectorCfg(Model.AttributeFrequency.JOINT_COORD, path=".*/Robot/joints/.*", count_per_world=6)
+ROBOT_QD = NewtonSelectorCfg(Model.AttributeFrequency.JOINT_DOF, path=".*/Robot/joints/.*", count_per_world=6)
 
 joint_pos = ObsTerm(func=mdp.joint_pos, params={"joints": ROBOT_Q})
 joint_vel = ObsTerm(func=mdp.joint_vel, params={"joints": ROBOT_QD})
@@ -277,7 +302,7 @@ Observations, target sampling and rewards must respect this mask. `dense_active(
 env.reset_keyboard(env_ids, variant_ids)
 ```
 
-The reset saves final observations when requested, prepares the new poses and velocities, and sends replacement requests to Newton. Newton initializes the new worlds before the task resumes. The task then stores the returned handles and reads the new state on the next observation.
+The reset prepares the new poses and velocities and sends replacement requests to Newton. Newton initializes the new worlds before the task resumes. The task then stores the returned handles and reads the new state on the next observation. During `env.step`, the task saves final observations before resetting when requested; calling `reset_keyboard` directly does not save them by itself.
 
 For periodic redistribution, `request_variants` records the desired keyboards and `stage_variant_changes` chooses which requests to apply at the boundary. Requesting a variant does not immediately move a live world.
 
@@ -324,14 +349,20 @@ The current generation ensures that the request refers to the world the task act
 
 </details>
 
+### An optional task optimization: sample commands only at reset
+
+The keyboard configuration also sets `resampling_time_range=None`. This samples a new typing command on explicit reset and skips the per-step timer and search for expired commands. Metrics and typing updates still run each step.
+
+**Growable memory does not require this change.** A task can keep timed command resampling. The old keyboard setting was a 10-second interval with 6-second episodes, so its timer normally never expired during an episode. Removing its timer sampling also changes random-number consumption; it is a separate task optimization, not a promise of identical seeded trajectories.
+
 ## Code to review {#source-snapshot}
 
-These links describe the implementation on `codex/scratch-domain-fold`, not the newer design proposals:
+These links pin the published implementation described above. Start with the source files for each layer's responsibility; the full comparisons also include tests and supporting changes.
 
-- [IsaacLab: keyboard task](https://github.com/ooctipus/IsaacLab/tree/797565c9c9da7a8b3ca9a74b33d8a2f7e402ee52/source/isaaclab_tasks/isaaclab_tasks/contrib/keyboard) — configuration, selections, MDP terms and reset requests.
-- [Newton: worlds.py](https://github.com/ooctipus/newton/blob/e66ed52db533b8a65635e4a61f79e4f8733d151f/newton/_src/solvers/mujoco/worlds.py) — prototype storage, reset ordering and graph construction.
-- [MJWarp: forward.py](https://github.com/ooctipus/mujoco_warp/blob/be0072dd0f0bf43e9459757a854aa5957de971d6/mujoco_warp/_src/forward.py), [workspace.py](https://github.com/ooctipus/mujoco_warp/blob/be0072dd0f0bf43e9459757a854aa5957de971d6/mujoco_warp/_src/workspace.py), [step_program.py](https://github.com/ooctipus/mujoco_warp/blob/be0072dd0f0bf43e9459757a854aa5957de971d6/mujoco_warp/_src/step_program.py) — physics, scratch discovery and connection to the graph.
-- [GPU Components: scratch.py](https://github.com/ooctipus/gpu-components/blob/338fa9b34f25ca60bc4a3713d79b1115baf68372/src/gpu_components/scratch.py) and [package source](https://github.com/ooctipus/gpu-components/tree/338fa9b34f25ca60bc4a3713d79b1115baf68372/src/gpu_components) — scratch requests, memory, world lookup and graph updates. This repository is private.
-- [Custom Warp](https://github.com/ooctipus/warp/tree/c48d4e3bd0dc7e1efd5284cd36c558dc95436fda) — count parameters, bounded copies and capture records.
+- **MJWarp:** [forward.py](https://github.com/ooctipus/mujoco_warp/blob/34e044b58f1292121e0a906a5e76d96993097341/mujoco_warp/_src/forward.py) owns numerical operations and their temporary allocations; [io.py](https://github.com/ooctipus/mujoco_warp/blob/34e044b58f1292121e0a906a5e76d96993097341/mujoco_warp/_src/io.py) defines native field layouts, defaults and state transfer. The [integration comparison](https://github.com/ooctipus/mujoco_warp/compare/d94c382698769968d30bbae333703cf84a2bcb9c...34e044b58f1292121e0a906a5e76d96993097341) starts from a review baseline with sleeping and independent numerical changes already applied, so they are excluded from this diff. It is not a comparison against untouched main.
+- **Newton:** [worlds.py](https://github.com/ooctipus/newton/blob/69f47697e6810bfd74c28182443f3f8c1ca643b1/newton/_src/solvers/mujoco/worlds.py) prepares prototype storage, records the graph and orders reset, movement and physics. The [main-to-branch comparison](https://github.com/ooctipus/newton/compare/009158e62b862b3b9d829397d6db583515ae1271...69f47697e6810bfd74c28182443f3f8c1ca643b1) includes work beyond this bridge.
+- **Custom Warp:** [capture_allocation.py](https://github.com/ooctipus/warp/blob/52da84604e541b77cc0433b86385de5edb620abc/warp/_src/capture_allocation.py) records allocation requests, supplies prepared arrays and checks reuse ordering. The [main-to-branch comparison](https://github.com/ooctipus/warp/compare/500272ef1c27756788526fd888da089990dd6b83...52da84604e541b77cc0433b86385de5edb620abc) also covers changing counts and bounded memory operations. This repository requires access.
+- **GPU Components:** [package source](https://github.com/ooctipus/gpu-components/tree/ec924032fafbe733931d14c2ddfc9f300049c574/src/gpu_components) contains `fields.py`, `graph.py`, `directory.py` and `backing.py`: typed storage, graph bindings, instance lookup and physical backing. This is the full source, not just the latest Warp-compatibility diff. The repository is private.
+- **IsaacLab task example:** [keyboard source](https://github.com/ooctipus/IsaacLab/tree/efb20421649496eef9b4f40b32613b913dabed70/source/isaaclab_tasks/isaaclab_tasks/contrib/keyboard) contains the configuration, selections and MDP terms shown here; [keyboard_worlds.py](https://github.com/ooctipus/IsaacLab/blob/efb20421649496eef9b4f40b32613b913dabed70/source/isaaclab_tasks/isaaclab_tasks/contrib/keyboard/keyboard_worlds.py) sends reset requests to Newton. Its [develop-to-branch comparison](https://github.com/ooctipus/IsaacLab/compare/2b8d48d010f8bbf2caedbde060b7b18e66dd5053...efb20421649496eef9b4f40b32613b913dabed70) still includes baseline implementations and optional task optimizations. **It is not a minimal integration patch.**
 
-This integration uses the custom Warp branch and CUDA memory-pool support. The prepared MJWarp step currently supports the validated keyboard configuration: the Newton solver, implicit-fast integrator and MJWarp's own collision path. Other configurations are checked and may be rejected. Adding an unseen topology or changing the model layout requires new preparation.
+This integration requires the custom Warp capture implementation and CUDA virtual-memory support. Newton admits the supported keyboard configuration: the Newton solver, implicit-fast integrator and MJWarp's own collision path. Ordinary MJWarp retains its other numerical paths; this does not mean every path can be used by the growable integration. An unseen topology or changed model layout requires new preparation.
