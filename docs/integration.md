@@ -8,6 +8,7 @@ sidebar_position: 7
 import ResetExample from '@site/src/components/ResetExample';
 import Tabs from '@theme/Tabs';
 import TabItem from '@theme/TabItem';
+import styles from '@site/src/css/integration.module.css';
 
 # Integration, from reset to physics
 
@@ -18,6 +19,8 @@ We prepare each scene in advance. The rest of these docs use Cartpole and G1, or
 This page follows one reset using those same examples, then shows the [physics code](#physics-code), [Newton's setup](#newton-setup) and [IsaacLab MDP code](#isaaclab-mdp). The scene diagrams explain the relationships; the code comes from the keyboard implementation at the [published commits below](#source-snapshot), updated October 4, 2026.
 
 **The full application diff is broader than the integration.** Reading and resetting worlds through their handles is part of the task integration. Keyboard generation, typing rewards and command-scheduling optimizations are application choices. They appear in the same IsaacLab branch, but another task does not need to copy them.
+
+**Before → after:** compare [temporary arrays](#temporary-arrays), [copies](#bounded-copies), [graph setup](#graph-before-after) and [task observations](#observation-before-after). Here, **before** means ordinary execution with a fixed population; **after** means this growable integration. The earlier scratch-helper design is shown separately and labeled as history.
 
 ## Follow one reset
 
@@ -54,16 +57,75 @@ A *CUDA graph* is the recorded sequence of GPU operations. Here, the sequence st
 
 The numerical step uses ordinary Warp arrays and launches. Newton supplies storage during capture and connects each changing count to its GPU source. MJWarp has no dependency on GPU Components.
 
-### Reuse temporary arrays
+### Reuse temporary arrays {#temporary-arrays}
 
-*Scratch* means temporary working memory, such as an intermediate matrix used while solving a step. The numerical stage allocates it where it is needed:
+*Scratch* means temporary working memory, such as an intermediate matrix used while solving a step. Here is one allocation from MJWarp's `implicit` stage:
 
-```python title="MJWarp forward.py"
-qDeriv = wp.empty((d.nworld, m.nC), dtype=float, device=d.qpos.device)
-derivative.deriv_smooth_vel(m, d, qDeriv)
+<div className={styles.comparison}>
+<div>
+<strong className={styles.label}>Before · fixed population</strong>
+
+```python
+qLD = wp.empty_like(d.qLD)
 ```
 
-The shape means one row per world, with `m.nC` values in each row. MJWarp owns that shape and the operations that initialize the values. The same code runs in an ordinary step and in a captured step; there is no temporary-array catalog or storage argument passed through the numerical stages.
+</div>
+<div>
+<strong className={styles.label}>After · growable population</strong>
+
+```python
+qLD = wp.empty(
+    (d.nworld, *d.qLD.shape[1:]),
+    dtype=float, device=d.qpos.device,
+)
+```
+
+</div>
+</div>
+
+**What changed:** `qLD` now names the world count explicitly. `empty_like(d.qLD)` would only carry the existing array's capacity; the explicit shape preserves the changing count's identity. The device is also explicit. This is still an ordinary Warp allocation at its point of use.
+
+The allocation keeps the original inner dimensions. MJWarp owns those shapes and the operations that initialize the values. The same code runs in an ordinary step and in a captured step; there is no temporary-array catalog or storage argument passed through the numerical stages.
+
+<details>
+<summary>Earlier integration → today: the scratch helper is gone</summary>
+
+This compares our previous integration with today's implementation, **not** upstream MJWarp with the integration.
+
+<div className={styles.comparison}>
+<div>
+<strong className={styles.label}>Earlier · engine requests named scratch</strong>
+
+```python
+from gpu_components.scratch import (
+    scratch_array,
+)
+
+qDeriv = scratch_array(
+    d.scratch, "implicit.qDeriv",
+    (d.nworld, m.nC), float,
+)
+```
+
+</div>
+<div>
+<strong className={styles.label}>Today · engine uses Warp</strong>
+
+```python
+qDeriv = wp.empty(
+    (d.nworld, m.nC), dtype=float,
+    device=d.qpos.device,
+)
+```
+
+</div>
+</div>
+
+The scratch name, `d.scratch` argument and GPU Components import disappeared from the numerical stage. Storage preparation still exists: Newton owns it, using allocation records supplied by custom Warp. GPU Components provides storage and graph bindings there.
+
+[Earlier source](https://github.com/ooctipus/mujoco_warp/blob/be0072dd0f0bf43e9459757a854aa5957de971d6/mujoco_warp/_src/forward.py) · [Current source](https://github.com/ooctipus/mujoco_warp/blob/34e044b58f1292121e0a906a5e76d96993097341/mujoco_warp/_src/forward.py).
+
+</details>
 
 During discovery, custom Warp records each `wp.empty` request with its shape, type and exact count identities. Newton prepares the final arrays, then records the program again with those arrays supplied at the allocation calls. Substitution happens before views, strides and kernel arguments are constructed. Graph replay executes the recorded operations without running Python allocation calls again.
 
@@ -104,7 +166,7 @@ Address-only discovery avoids materializing temporary allocation occurrences dur
 
 The velocity update computes `velocity += timestep * acceleration`. Its launch has one thread per world and velocity coordinate (`m.nv`):
 
-```python title="MJWarp forward.py"
+```python title="Before and after — this numerical launch is unchanged"
 wp.launch(
     _next_velocity, dim=(d.nworld, m.nv),
     inputs=[m.opt.timestep, d.qvel, qacc, 1.0], outputs=[d.qvel],
@@ -115,15 +177,78 @@ For an ordinary step, `d.nworld` is an integer. For a recorded, changing-size st
 
 In the example above, the first scene's launch processes three worlds before reset and two afterward. An update operation reads the count and changes the recorded launch size before physics runs. This does not record a new graph.
 
-The final array descriptors describe their maximum reserved size. Copying the entire array would therefore be wrong. The custom Warp `extent` argument says how much to copy:
+### Copy only the current worlds {#bounded-copies}
 
-```python title="MJWarp forward.py"
-wp.copy(d.qacc_warmstart, d.qacc, extent=(d.nworld, *d.qacc_warmstart.shape[1:]))
+The final array descriptors describe their maximum reserved size. Copying the entire array would therefore be wrong. This is an actual numerical-code edit:
+
+<div className={styles.comparison}>
+<div>
+<strong className={styles.label}>Before · copy the full array</strong>
+
+```python
+wp.copy(d.qacc_warmstart, d.qacc)
 ```
 
-This saves the current worlds' accelerations for use in the next step. It leaves the remaining reserved rows alone. The original Data object keeps its integer capacities; the separate `execution_data` object supplies the changeable counts to the step.
+</div>
+<div>
+<strong className={styles.label}>After · copy the live prefix</strong>
+
+```python
+wp.copy(
+    d.qacc_warmstart, d.qacc,
+    extent=(
+        d.nworld,
+        *d.qacc_warmstart.shape[1:],
+    ),
+)
+```
+
+</div>
+</div>
+
+If storage reserves 4,096 worlds and only 600 are live, the second copy touches 600 rows. The custom Warp `extent` argument supplies that changing prefix. This saves the current worlds' accelerations for use in the next step and leaves the remaining reserved rows alone. The original Data object keeps its integer capacities; the separate `execution_data` object supplies the changeable counts to the step.
+
+The allocation, launch and copy excerpts above compare the [fixed-population review baseline](https://github.com/ooctipus/mujoco_warp/blob/d94c382698769968d30bbae333703cf84a2bcb9c/mujoco_warp/_src/forward.py) with the [current integration](https://github.com/ooctipus/mujoco_warp/blob/34e044b58f1292121e0a906a5e76d96993097341/mujoco_warp/_src/forward.py). Their numerical work is the same; how storage and work counts are supplied changes.
 
 ## Newton: prepare the arrays and record the step {#newton-setup}
+
+### Before and after graph setup {#graph-before-after}
+
+These are **setup excerpts, not complete applications**. On the left, `model` and fixed-size `data` have already been allocated and warmed up. On the right, `worlds` has been prepared from the prototypes, and `commands` and `results` have been allocated. This small example uses prototype defaults at reset and omits task callbacks.
+
+<div className={styles.comparison}>
+<div>
+<strong className={styles.label}>Before · record one fixed batch</strong>
+
+```python
+with wp.ScopedCapture() as capture:
+    for _ in range(8):
+        mjw.step(model, data)
+
+graph = capture.graph
+```
+
+</div>
+<div>
+<strong className={styles.label}>After · let Newton record the batches</strong>
+
+```python
+from newton.solvers import (
+    mujoco_worlds_capture,
+)
+
+graph = mujoco_worlds_capture(
+    worlds, commands, results,
+    substeps=8,
+)
+```
+
+</div>
+</div>
+
+**The extra setup moves into Newton; it does not vanish.** Newton records reset handling, the count updates and each prototype's physics. The application sends create or replace requests through `commands` and replays the resulting graph with `wp.capture_launch(graph)`. For the Cartpole/G1 diagram, one recorded program covers both batches as their populations change. The same applies to the two banana/Franka scenes.
+
+The keyboard task also supplies action and reset callbacks. Its `application_bindings` declarations and memory-growth service remain part of integration; the short call above does not replace them.
 
 Newton's `MuJoCoWorlds` connects the pieces. `mujoco_worlds_prepare` starts with each prototype's model and one-world Data template. It allocates persistent state using MJWarp's field layouts, defaults and state-transfer rules. `mujoco_worlds_capture` then:
 
@@ -223,20 +348,47 @@ abnormal_robot = DoneTerm(func=mdp.joint_vel_out_of_limit, params={"joints": ROB
 
 Path matching happens once, before the managers are constructed. `selection_paths.py` converts the paths into numeric joint indices for each prototype. Physics reads and writes use those indices; they do not search strings at every step.
 
-### Read observations and write actions
+### Read observations and write actions {#observation-before-after}
 
-The observation functions are small:
+The earlier task read joint positions from one asset view. The current task uses the selection configured above:
 
-```python title="mdp/observations.py"
+<div className={styles.comparison}>
+<div>
+<strong className={styles.label}>Before · read the robot asset</strong>
+
+```python
+def joint_pos(
+    env,
+    asset_cfg=SceneEntityCfg("robot"),
+):
+    asset = env.scene[asset_cfg.name]
+    return asset.data.joint_pos.torch[
+        :, asset_cfg.joint_ids
+    ]
+```
+
+</div>
+<div>
+<strong className={styles.label}>After · read the selected joints</strong>
+
+```python
 def joint_pos(env, joints):
     return joints.read_state("joint_q")
+```
 
+</div>
+</div>
 
+**What changed:** the term receives a selection instead of finding an asset. Both return joint positions in the task's coordinate convention. The selection resolves each environment's current prototype and array row, so the term still works after reset or compaction. The configuration supplies `params={"joints": ROBOT_Q}`.
+
+[Earlier observation](https://github.com/ooctipus/IsaacLab/blob/2b8d48d010f8bbf2caedbde060b7b18e66dd5053/source/isaaclab/isaaclab/envs/mdp/observations.py) · [Current task observation](https://github.com/ooctipus/IsaacLab/blob/efb20421649496eef9b4f40b32613b913dabed70/source/isaaclab_tasks/isaaclab_tasks/contrib/keyboard/mdp/observations.py). Excerpts omit type annotations.
+
+Joint velocities use the same selection pattern:
+
+```python
 def joint_vel(env, joints):
     return joints.read_state("joint_qd")
 ```
-
-For each environment, the selection finds its current world and reads the selected joints. The same function works after a reset changes the prototype or compaction moves the state to a different row.
 
 The action term uses the same lookup when writing control targets. These lines are inside its Warp kernel; `action` has already been scaled:
 

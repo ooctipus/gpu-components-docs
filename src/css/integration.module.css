@@ -1,0 +1,19 @@
+.comparison {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 22rem), 1fr));
+  gap: 1rem;
+  margin: 1rem 0;
+}
+
+.comparison > div {
+  min-width: 0;
+}
+
+.label {
+  display: block;
+  margin-bottom: 0.5rem;
+}
+
+.comparison pre {
+  font-size: 0.85rem;
+}
