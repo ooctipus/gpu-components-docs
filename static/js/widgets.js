@@ -765,29 +765,46 @@
       progressText.textContent = pending?.complete ? "GPU finished. The pages can now be unmapped or reopened." : "Earlier GPU work is still using the old range. The CPU is free to submit other work.";
       finishButton.disabled = !pending || pending.complete;
       const historical = S.mapped[S.sel] < S.highWater[S.sel];
-      mapAction.querySelector(".gc-action-cost").textContent = historical ? "CPU wait + driver calls" : "Driver calls; can overlap GPU work";
-      mapAction.classList.toggle("gc-operation-wait", historical);
+      const mapWait = mapAction.querySelector(".gc-op-wait");
+      mapWait.textContent = historical ? "CPU waits" : "No CPU wait";
+      mapWait.classList.toggle("gc-op-blocking", historical);
+      mapAction.title = historical ? "Previously used addresses: this drawing waits for readers before remapping, then publishes GPU counts." : "New addresses: CPU map and access-permission calls can overlap GPU work; GPU counts are published afterward.";
+      const unmapCost = unmapAction.querySelector(".gc-op-work");
+      unmapCost.textContent = pending && !pending.complete ? "Poll only" : "Driver calls";
+      unmapCost.classList.toggle("gc-op-driver", !pending || pending.complete);
     }
     S.sel = 0;
     const chips = P.map((p, k) => button(shortName(p), () => { S.sel = k; render(); }));
     root.appendChild(el("div", { class: "gc-toolbar" }, [el("span", { class: "gc-label", text: "prototype:" })].concat(chips)));
-    const act = (label, fn, cost) => el("div", { class: "gc-operation" }, [button(label, () => fn(S.sel)), el("span", { class: "gc-action-cost", text: cost })]);
-    const mapAction = act("Map pages", map, "Driver calls; can overlap GPU work");
-    root.appendChild(el("div", { class: "gc-operations" }, [
-      act("Create world", create, "GPU work"), act("Compact worlds", compact, "GPU copies"), mapAction,
-      act("Stop using last page", withdraw, "Queue GPU work; no CPU wait"),
-      act("Unmap unused pages", reclaim, "Poll; driver calls when ready"),
-      act("Keep & reopen pages", reopen, "Cancel + republish; no remap"),
+    const act = (label, fn, location, cost, wait, title) => el("button", {
+      type: "button", class: "gc-op-row", "aria-label": label, title, onclick: () => fn(S.sel),
+    }, [
+      el("span", { class: "gc-op-name", text: label }),
+      el("span", { class: "gc-op-location" + (location === "GPU" ? " gc-op-gpu" : ""), text: location }),
+      el("span", { class: "gc-op-work" + (cost === "Driver calls" ? " gc-op-driver" : ""), text: cost }),
+      el("span", { class: "gc-op-wait" + (wait === "CPU waits" ? " gc-op-blocking" : ""), text: wait }),
+    ]);
+    const mapAction = act("Map pages", map, "CPU + GPU", "Driver calls", "No CPU wait", "");
+    const unmapAction = act("Unmap unused pages", reclaim, "CPU", "Driver calls", "No CPU wait", "Poll completion. If unfinished, return without unmapping. Otherwise CPU driver cost scales with pages; remaining GPU work can continue.");
+    root.appendChild(el("div", { class: "gc-op-panel" }, [
+      el("div", { class: "gc-op-head", "aria-hidden": "true" }, ["Action", "Runs on", "Cost comes from", "CPU wait"].map(text => el("span", { text }))),
+      act("Create world", create, "GPU", "Data writes", "No CPU wait", "Initialize the new world's data and update the directory. Cost depends on initialized bytes and directory work."),
+      act("Compact worlds", compact, "GPU", "Scan + copies", "No CPU wait", "Scan slots and copy worlds into holes. Cost depends on slot capacity and bytes moved."),
+      mapAction,
+      act("Stop using last page", withdraw, "CPU + GPU", "Slot scan", "No CPU wait", "CPU queues a directory scan, count updates and event dependencies. No payload copy. GPU work waits for earlier readers; the CPU returns."),
+      unmapAction,
+      act("Keep & reopen pages", reopen, "CPU + GPU", "Metadata", "No CPU wait", "Poll completion, cancel the pending unmap, then restore readiness and directory admission. No payload copy or remap in this illustration."),
     ]));
+    root.appendChild(el("p", { class: "gc-op-legend", text: "Amber = driver cost · Red = CPU waits for GPU. Data and scan costs depend on how much work is done." }));
     const progressText = el("span", {});
     const finishButton = button("Finish earlier GPU work (simulate)", () => finishReaders(S.sel));
     progress.append(progressText, finishButton);
     root.appendChild(progress);
     root.appendChild(figure); root.appendChild(stats); root.appendChild(note);
     const extra = el("details", { class: "gc-stack-extra" }, [el("summary", { text: "Other actions and drawing scale" })]);
-    const trimAction = act("Release pooled memory", trim, "CPU wait + driver calls (shown path)");
-    trimAction.classList.add("gc-operation-wait");
-    extra.appendChild(el("div", { class: "gc-operations" }, [trimAction, act("Check stale handle", lookupStale, "GPU lookup"), act("Start over", reset, "Reset this drawing")]));
+    const trimAction = act("Release pooled memory", trim, "CPU", "Driver calls", "CPU waits", "The shown path waits for readers, then calls cuMemRelease on pooled physical blocks.");
+    extra.appendChild(el("div", { class: "gc-op-panel" }, [trimAction, act("Check stale handle", lookupStale, "GPU", "One lookup", "No CPU wait", "Check identity and generation on the GPU.")]));
+    extra.appendChild(button("Start over", reset));
     extra.appendChild(el("p", { class: "gc-hint", text: `Illustration only: ${ST.note}. The pool starts allocated. Real map, access-permission and unmap costs depend on the GPU and page count; the drawing does not measure them.` }));
     root.appendChild(extra); reset();
   }
