@@ -4,6 +4,9 @@ title: Four parts
 sidebar_position: 5
 ---
 
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+
 # Four parts
 
 Take 6 cartpoles and 2 G1s. Replace cartpole world 3 with a G1, and create one additional cartpole. The result is 6 cartpoles and 3 G1s: 9 worlds in total.
@@ -31,28 +34,42 @@ This example needs no new mappings because both destinations fit in ready storag
 
 ## Who calls whom
 
+<Tabs lazy>
+<TabItem value="decisions" label="Decisions" default>
+
+**Who chooses the next scene?** The task owns rewards, episode termination and the curriculum. It can request “replace world 3 with a G1.” Newton arranges the work needed to carry out that request.
+
 ```mermaid
+%%{init: {"flowchart": {"rankSpacing": 28}}}%%
 flowchart TB
-    Engine["Newton<br/>connects physics, counts, ordering and memory service"]
-    Engine --> directory
-    Engine --> fields
-    Engine --> graphmod
-    Engine --> backing
-    subgraph pkg["gpu_components"]
-        direction TB
-        directory["directory<br/>who is where"]
-        fields["fields<br/>the bytes of each slot"]
-        backing["backing<br/>the pages under the rows<br/>stdlib + libcuda only"]
-        graphmod["graph<br/>kernel nodes bound to counts"]
-        fields --> backing
-        fields -.->|retain, invalidate| graphmod
-        directory -.->|retain, invalidate| graphmod
-    end
-    pkg --> Warp["Warp: kernels, arrays, capture"]
-    pkg --> CUDA["CUDA driver: VMM, graphs, device node updates"]
+    task["Task<br/>Choose cartpole → G1"] -->|reset request| engine["Newton<br/>Order the reset and physics"]
+    engine -->|calls the four parts| parts["GPU Components"]
 ```
 
-The directory never calls fields or backing, and fields never calls the directory. Newton is the only thing that knows about all of them, which is why a create inside the graph can only ever be placed or rejected: nothing in the directory can reach for pages.
+GPU Components knows numeric identities, slots and counts. It does not choose rewards or scenes. Physics is supplied by Newton's solver.
+
+</TabItem>
+<TabItem value="calls" label="Module calls">
+
+**Inside GPU Components.** Each arrow means “calls functions in.”
+
+```mermaid
+flowchart LR
+    fields --> backing
+    fields --> graphmod["graph"]
+    directory --> graphmod
+```
+
+`fields` calls `backing` to manage the memory under its arrays.
+
+`fields` and `directory` call `graph` to keep recorded resources alive and invalidate failed recordings. Those arrows describe recording safety, not a simulation-step sequence.
+
+**There is no call from `directory` to `fields` or `backing`.** A create request can claim an available slot or be rejected; it cannot allocate more memory. Newton coordinates the separate operations.
+
+</TabItem>
+</Tabs>
+
+For the Warp and CUDA boundaries, see [Integration](integration.md).
 
 ## Two conventions
 
