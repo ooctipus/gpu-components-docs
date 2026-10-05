@@ -2,24 +2,27 @@
 id: lineage
 title: Where the waits go
 sidebar_position: 3
+hide_table_of_contents: true
 ---
+
+import WaitTimeline from '@site/src/components/WaitTimeline';
 
 # Where the waits go
 
-Stable addresses let us reuse the graph. GPU counts let it process a changing population. Neither makes memory maintenance free. The same safety rule applies to both shrink paths: no reader may access memory after it is unmapped.
+Follow one world resetting into a different scene. Add each mechanism to see what moves onto the GPU, which CPU waits disappear, and where the physical memory goes.
 
-<div class="gc-widget" data-widget="ladder"></div>
+<WaitTimeline />
 
-## Two different shrink paths
+## What the animation represents
 
-**Joined resize** waits for the supplied readers on the CPU, then changes backing and publishes readiness. It is simple and remains available.
+**One graph, independent branches.** Reset and count updates happen before the prototype physics branches split. The branches join before the replay finishes. They are not separate executable graphs or dedicated CUDA streams. Each branch still runs its physics substeps in order.
 
-**Deferred retirement** submits the withdrawal in GPU stream order and returns. Earlier readers finish while the CPU can submit other work. Reclaim polls completion and unmaps only when safe. This removes the explicit CPU reader wait; driver calls still take time and can affect concurrent work.
+The earlier stages are teaching baselines, not a reconstruction of past benchmark runs. Mapping, permission setup and unmapping remain CPU driver calls. Overlap is possible where dependencies permit it; the animation does not predict duration, GPU occupancy or speedup.
 
-The current IsaacLab keyboard reset path calls `mujoco_worlds_grow_backing` for growth and blocking `mujoco_worlds_resize_backing` when shrinking. Newton and GPU Components also support deferred retirement; the task must explicitly choose it.
+## What runs today
 
-## What is not automatic
+Newton and GPU Components provide all six mechanisms. The current IsaacLab keyboard task uses fresh growth and **blocking shrink**: `mujoco_worlds_grow_backing` and `mujoco_worlds_resize_backing`. It has not selected the deferred shrink policy shown in step 6. The task also retains its reset-demand and status readbacks.
 
-A background mapping thread is not part of these APIs. The composition owner still calls the memory service and names the reader streams. A warm pool is an application policy, not an automatic allocation of the whole budget at startup. Mapping one physical page into two prototype reservations is also not supported.
+The application calls the memory service and supplies its reader streams. There is no automatic background mapping thread. Pooled memory stays inside the physical budget; a page cannot back two prototypes at once. Newton allows only one pending retirement batch and completes it before further growth.
 
-At a full budget, a receiver cannot reuse donor memory before the donor's old readers complete and its pages are returned. More overlap helps only when there is independent work or spare backing available. See [virtual and physical memory](concepts/memory.md) for the actual ownership rules and [Integration](integration.md) for the engine and task boundaries.
+See [virtual and physical memory](concepts/memory.md) for ownership rules and [Integration](integration.md) for the actual engine and task code.

@@ -197,10 +197,3 @@
 .gc-q-call { margin-bottom: 4px; }
 .gc-hd-result { margin: 0; font-size: 0.74rem; line-height: 1.5; background: transparent; padding: 0; white-space: pre; overflow-x: auto; }
 .gc-note-bad .gc-hd-result { color: #991b1b; }
-
-.gc-ld-head { display: flex; align-items: baseline; gap: 8px; margin: 4px 0; }
-.gc-ld-name { font-weight: 700; font-size: 0.95rem; }
-.gc-ld-stat { font-family: var(--ifm-font-family-monospace); font-size: 0.74rem; color: var(--ifm-color-emphasis-700); margin: -2px 0 6px; }
-.gc-ld-grid { display: grid; grid-template-columns: 120px 1fr; gap: 6px 12px; font-size: 0.82rem; line-height: 1.45; margin-bottom: 10px; }
-.gc-ld-term { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--ifm-color-emphasis-600); padding-top: 2px; }
-.gc-ld-row { grid-template-columns: 1fr 170px 190px; }

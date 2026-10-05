@@ -1141,45 +1141,7 @@
     say("Six cartpoles and two G1s, all at generation 1. Look up a handle, or change the world set and look again."); render();
   }
 
-  /* ------------------------------------------------------------------ */
-  /* 12. Ladder: from the naive version to this design, one overhead     */
-  /*     at a time, with the CPU and GPU timeline of one reset + step    */
-  /* ------------------------------------------------------------------ */
-  function ladder(root) {
-    const stages = [
-      { name: "1. Fixed addresses", change: "Reserve a virtual range once. Map physical memory beneath it as needed.", stays: "The reservation and captured pointers stay fixed. Access is valid only where backing and permission are ready.", cost: "Reservation capacity is finite. Directory metadata and capacity scans still cost memory and time." },
-      { name: "2. GPU placement", change: "A command batch creates, replaces or destroys worlds. Compaction updates their locations after copying continuing state.", stays: "A continuing world's handle survives compaction. Replacement publishes a new generation.", cost: "Initialization, copies and directory kernels remain real GPU work." },
-      { name: "3. GPU work counts", change: "The updater reads device counts before the dependent kernels and adjusts their work sizes.", stays: "The prepared graph can replay with different populations inside its declared limits.", cost: "Updater and conditional-control work remain. A changed topology or unsupported branch needs preparation." },
-      { name: "4. Fresh mapping", change: "Map addresses beyond the historical mapping frontier without an explicit CPU reader join, then publish readiness in stream order.", stays: "Existing readers stay inside the old ready prefix. New rows are not readable until mapped, accessible and initialized as required.", cost: "Host map and access calls still take time. Historical address reuse requires maintenance; a full budget can delay growth." },
-      { name: "5. Reuse backing", change: "Keep unmapped handles in the shared pool. A later map takes a compatible handle from that pool first.", stays: "Mapped and pooled handles both count against the budget.", cost: "A cold pool still requires physical allocation. Warm backing removes that allocation, not mapping or permission work. Driver failures remain possible." },
-      { name: "6. Deferred retirement", change: "Withdraw the tail in stream order, keep its pages mapped while old readers finish, then poll and reclaim.", stays: "Future work must obey the smaller prefix. All earlier readers must be included. Surviving-prefix work may continue.", cost: "The CPU no longer waits explicitly for those readers. Unmap still runs on the host, and receivers need the donor's pages before reuse. Joined resize is still available." },
-    ];
-    let selected = 5;
-    const body = el("div", { class: "gc-wt-state" });
-    const buttons = stages.map((stage, i) => button(stage.name, () => { selected = i; render(); }));
-    function render() {
-      buttons.forEach((b, i) => b.classList.toggle("gc-btn-primary", selected === i));
-      const stage = stages[selected]; body.innerHTML = "";
-      body.appendChild(el("div", { class: "gc-ld-name", text: stage.name }));
-      const grid = el("div", { class: "gc-ld-grid" });
-      [["Change", stage.change], ["Still required", stage.stays], ["Remaining cost", stage.cost]].forEach(([label, text]) => {
-        grid.appendChild(el("div", { class: "gc-ld-term", text: label }));
-        grid.appendChild(el("div", { text }));
-      });
-      body.appendChild(grid);
-      if (selected === 5) {
-        const flow = el("div", { class: "gc-toolbar", "aria-label": "Deferred retirement sequence" });
-        ["Withdraw admission + ready", "→ keep pages mapped", "→ poll reader events", "→ CPU unmap", "→ shared pool"].forEach((text) => flow.appendChild(el("span", { class: "gc-chip", text })));
-        body.appendChild(flow);
-      }
-    }
-    root.appendChild(el("div", { class: "gc-toolbar gc-steptabs" }, buttons));
-    root.appendChild(body);
-    root.appendChild(el("div", { class: "gc-hint", text: "These are available mechanisms, not measured speedups or a promise of zero GPU idle time. The application chooses when to grow, retain spare capacity, use joined resize, or defer retirement." }));
-    render();
-  }
-
-  const widgets = { population, lifecycle, replay, backing, memory, distribution, stack, compare, walkthrough, quantities, handles, ladder };
+  const widgets = { population, lifecycle, replay, backing, memory, distribution, stack, compare, walkthrough, quantities, handles };
   function init() {
     document.querySelectorAll(".gc-widget").forEach((root) => {
       if (root.dataset.ready && root.childElementCount > 0) return;
