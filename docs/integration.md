@@ -55,23 +55,40 @@ A *CUDA graph* is the recorded sequence of GPU operations. Here, the sequence st
 
 ## MJWarp and Warp: temporary arrays and world counts {#physics-code}
 
-The numerical step uses ordinary Warp arrays and launches. Newton supplies storage during capture and connects each changing count to its GPU source. MJWarp has no dependency on GPU Components.
+MJWarp still calls `wp.empty` and `wp.launch`. The important change is **what `d.nworld` contains when Newton records a growable batch**.
 
-### Reuse temporary arrays {#temporary-arrays}
+### Why the temporary allocation changes {#temporary-arrays}
 
-*Scratch* means temporary working memory, such as an intermediate matrix used while solving a step. Here is one allocation from MJWarp's `implicit` stage:
+Suppose we reserve space for **4,096 worlds**, currently have **600 live worlds**, and need **80 temporary values per world**. The width 80 is just an example.
+
+In ordinary execution, `d.nworld` is an integer. When Newton records a growable batch, it is a **`CountParameter` object**. That object stands for a changing GPU count; Newton connects it to the GPU integer that currently holds 600.
+
+```python title="The two values look related, but contain different information"
+# Ordinary fixed batch:
+d.nworld       # 4096 — a Python integer
+d.qLD.shape    # (4096, 80)
+
+# Growable batch during recording:
+d.nworld       # CountParameter(maximum=4096) — a parameter object
+d.qLD.shape    # (4096, 80) — still the reserved dimensions
+# The current value of the parameter lives separately on the GPU: 600.
+```
+
+**`empty_like(d.qLD)` reads the array's shape. It does not read `d.nworld`.** It can copy the numbers `(4096, 80)`, but the source array does not carry the link to that changing world count.
 
 <div className={styles.comparison}>
 <div>
-<strong className={styles.label}>Before · fixed population</strong>
+<strong className={styles.label}>Before · copy the existing array shape</strong>
 
 ```python
 qLD = wp.empty_like(d.qLD)
 ```
 
+Information supplied: **`(4096, 80)`**. A fixed-size array request.
+
 </div>
 <div>
-<strong className={styles.label}>After · growable population</strong>
+<strong className={styles.label}>After · pass the world-count parameter</strong>
 
 ```python
 qLD = wp.empty(
@@ -80,14 +97,20 @@ qLD = wp.empty(
 )
 ```
 
+Information supplied: **`(world_count, 80)`**. The first dimension follows this world population.
+
 </div>
 </div>
 
-**What changed:** `qLD` now names the world count explicitly. `empty_like(d.qLD)` would only carry the existing array's capacity; the explicit shape preserves the changing count's identity. The device is also explicit. This is still an ordinary Warp allocation at its point of use.
+Here `d.nworld` passes the **parameter object**, not the integer 600. `*d.qLD.shape[1:]` keeps the remaining dimensions—in this example, 80. The type and device are written out because `empty_like` used to infer them.
 
-For example, the logical work shape can be **`(n, 80)`**, with `n` changing from 600 to 900, while the reserved array shape stays **`(4096, 80)`**. `d.nworld` identifies that changing count; `d.qLD.shape[0]` only gives the capacity. Backing must be ready before operations use the additional rows. Our current allocation-capture API rejects `empty_like` because it cannot preserve this relationship; the longer spelling is an API limitation, not a mathematical requirement of growable memory.
+**Why the memory planner needs this:** a plain `(4096, 80)` request is treated as fixed scratch, with all rows allocated. A `(world_count, 80)` request is placed in the prototype's growable world storage. It reserves the same maximum shape, but its physical backing can grow with the usable world capacity instead of always occupying space for every possible world. Backing may include spare rows and page rounding; 600 live worlds does not mean exactly 600 rows are mapped.
 
-The allocation keeps the original inner dimensions. MJWarp owns those shapes and the operations that initialize the values. The same code runs in an ordinary step and in a captured step; there is no temporary-array catalog or storage argument passed through the numerical stages.
+The runtime does not allocate a new array every time 600 becomes 900. The array's address and reserved shape remain fixed; enough backing must be ready before the recorded operations use the additional rows.
+
+**This is a limitation of our current API.** During allocation discovery, our Warp fork rejects `empty_like` because it cannot carry this count relationship. The explicit shape is how we supply the missing information today. If the source array or view retained that relationship and `empty_like` inherited it, the original one-line call could remain.
+
+The numerical code still initializes and uses the temporary in the same way. MJWarp does not import GPU Components or receive a scratch-storage argument; Newton handles storage preparation outside the numerical stages.
 
 <details>
 <summary>Earlier integration → today: the scratch helper is gone</summary>
@@ -129,7 +152,7 @@ The scratch name, `d.scratch` argument and GPU Components import disappeared fro
 
 </details>
 
-During discovery, custom Warp records each `wp.empty` request with its shape, type and exact count identities. Newton prepares the final arrays, then records the program again with those arrays supplied at the allocation calls. Substitution happens before views, strides and kernel arguments are constructed. Graph replay executes the recorded operations without running Python allocation calls again.
+During preparation, Warp records these allocation requests. Newton prepares their storage and records the program again, supplying the prepared arrays at the `wp.empty` calls. Graph replay runs the recorded GPU operations; it does not run these Python allocation calls again.
 
 Newton marks each complete native step as a temporary lifetime:
 
