@@ -20,7 +20,7 @@ The tests check these and the docstrings refer to them. A change that violates o
 | Dense prefix | After `publish_compaction`, live slots of a prototype are exactly `[0, live_count)` |
 | Conservation | live + free + unavailable = slot limit per prototype; mapped + spare = retained ≤ budget |
 | Readiness order | ready ≤ mapped; readiness is published only after mapping and access succeed |
-| Join asymmetry | Mapping never-mapped addresses needs no reader join; unmapping, remapping a historical address, overwriting or retiring needs every reader joined |
+| Join asymmetry | Mapping never-mapped addresses needs no reader join; unmapping, historical remapping, overwrite or retirement requires conflicting readers to complete; deferred retirement can poll that completion without a CPU join |
 | Validate before emit | Under capture, validation precedes emission; after any possible partial emission the capture is invalid |
 | Updater dependency | Every bound kernel node has a full-completion dependency path from the updater |
 | Retained failure | A failed cleanup keeps surviving native resources in the ledger for retry |

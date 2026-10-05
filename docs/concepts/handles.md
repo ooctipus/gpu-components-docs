@@ -6,30 +6,25 @@ sidebar_position: 1
 
 # Handle and location
 
-A world has an identity that does not move and a location that can. The directory stores both relations and checks them against each other on lookup.
+Two pairs describe a world, and the directory translates between them.
 
-```mermaid
-flowchart LR
-    subgraph Handle["Handle (stable)"]
-        H["instance_id = 17<br/>generation = 3"]
-    end
-    subgraph Forward["prototype[], slot[]"]
-        F["id 17 → cartpole prototype, slot 5"]
-    end
-    subgraph Inverse["slot_id[]"]
-        I["cartpole prototype, slot 5 → id 17"]
-    end
-    H -->|location| F
-    F -->|handle_at| I
-    I -->|"must be 17, generation 3"| H
-```
+- **Handle** `(identity, generation)`: the world's name. Never changes while the world lives; never matches again once it is gone.
+- **Location** `(prototype, slot)`: where its bytes are, the prototype index and the slot inside that prototype's partition. Compaction can change a live world's location. REPLACE ends that lifetime and publishes a new one.
+- **Lookups**, one in each direction. Failure returns `valid = False` with sentinel values.
 
-`location(data, id, generation)` returns `(prototype, slot, valid)`. It returns invalid if the generation is stale or if the inverse table disagrees with the forward table. `handle_at(data, prototype, slot)` returns `(id, generation, valid)` and checks the forward table. Both are `wp.func`s and can be called from kernels, so a MJWarp kernel that holds a handle can find its world index without a host round trip.
+  ```text
+  location(data, identity, generation)  →  (prototype, slot, valid)
+  handle_at(data, prototype, slot)      →  (identity, generation, valid)
+  ```
 
-Compaction moves slots and does not change handles. After `publish_compaction`, each live handle resolves to its new slot with the same identity and generation.
+The scene below is the one from the [Four parts](../structure.md) walkthrough: identities 0 to 5 in cartpole slots 0 to 5, identities 6 and 7 in G1 slots 0 and 1, all at generation 1.
 
-Generations do not wrap. Each publication of an identity increments its generation. At the maximum value the identity is retired and never reused. A stale handle therefore cannot match a later lifetime of the same identity.
+<div class="gc-widget" data-widget="handles"></div>
 
-:::note In Newton
-An IsaacLab environment id is mapped to a handle by Newton. When the environment resets into a new world prototype, the handle's identity stays and its generation advances; when the environment is destroyed, the identity is retired. Code that cached the old handle gets `valid = False` from `location`, not another world's state.
-:::
+Three rules make this safe to cache.
+
+- **A lookup checks both tables.** `location(data, id, generation)` reads the forward table, compares the generation, then confirms the inverse table at that slot names the same identity. Any mismatch returns `valid = False`, never another world's state. `handle_at(data, prototype, slot)` goes the other way. Both are `wp.func`s, so a kernel holding a handle finds its world index without a host round trip.
+- **Compaction moves slots, not handles.** After `publish_compaction` every live handle resolves to its new slot with the same identity and generation. Code that cached `(8, 1)` keeps working; code that cached "slot 6" does not, which is why slots are never the thing to hold.
+- **Identities can be reused; handles cannot.** Publication advances the generation except for a terminal DESTROY at the maximum value. A dead identity below that maximum can be reused by a later batch; a terminal identity is permanently retired. No generation wraps or gets reissued for another lifetime.
+
+The IsaacLab task keeps the environment-to-handle mapping. Newton and GPU Components operate on numeric handles and locations; they do not need learning environment ids.

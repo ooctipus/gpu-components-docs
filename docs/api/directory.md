@@ -19,6 +19,7 @@ Identity and placement of worlds. All operands are explicit records. Costs use I
 | `publish_compaction(directory)` | Apply moves once every copy is acknowledged | O(S + P) |
 | `publish_admissible_slots(directory, prefix_ends)` | Make `[0, end)` admissible per prototype; stream-ordered, no readback | O(S + P) |
 | `withdraw_admissible_slots(directory, prefix_ends)` | Withdraw a free tail; rejects a live tail; joined | O(S + P) |
+| `withdraw_admissible_slots_async(directory, prefix_ends)` | GPU-check all tails and phase, then withdraw admission; borrowed status, no host readback | O(S + P) |
 | `location(data, id, generation)`, `handle_at(data, prototype, slot)` | `wp.func` lookups for use in kernels | O(1) |
 | `retain_graph`, `validate_buffers`, `memory_report`, `close` | Lifetime and accounting | |
 
@@ -33,3 +34,5 @@ Identity and placement of worlds. All operands are explicit records. Costs use I
 `InstanceStatus`: `OK`, `INVALID`, `STALE`, `NOT_ALIVE`, `BAD_PROTOTYPE`, `CONFLICT`, `NO_IDS`, `NO_SLOTS`, `GENERATION_EXHAUSTED`, `BAD_COUNT`, `STALE_BATCH`, `INITIALIZATION_MISSING`, `COMPACTION_INVALID`, `PHASE_INVALID`.
 
 `InstancePhase`: `IDLE`, `VALIDATED`, `ADMITTED`, `MOVING`, `COPIED`.
+
+Admission withdrawal does not retire payload readers or unmap memory. The composition owner orders it before field withdrawal and consumes its borrowed status before another capacity operation overwrites it.

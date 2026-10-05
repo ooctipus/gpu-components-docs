@@ -6,36 +6,18 @@ sidebar_position: 3
 
 # Seven distinct quantities
 
-The following quantities are tracked separately and written by different operations. Treating one as another is the usual source of errors in dynamic GPU memory.
+Take the illustrative cartpole storage from the [Four parts](../structure.md) walkthrough: 6 live worlds, 4 pages mapped, 21,845 slots reserved. These numbers answer different questions: which rows exist, which are accessible, and which should a kernel process? Confusing them can cause a kernel to touch unmapped memory or read an uninitialized world.
 
-```
-world index →  0        live       admissible   ready        mapped       reserved
-               |----------|-----------|------------|------------|------------|
-               |  live    |  free     | not yet    | mapped,    | virtual    |
-               |  worlds  |  slots the| admissible | not yet    | addresses  |
-               |          |  directory| (needs     | published  | without    |
-               |          |  may hand | publish_   | as ready   | physical   |
-               |          |  out      | admissible)| (headroom) | pages      |
-               |----------|-----------|------------|------------|------------|
-                          ↑ protected_count: slots that must not be unmapped
-               ↑ execution count: the slots a kernel iterates in this replay
-```
+The figure grows the storage by one page, creates a thousand worlds, replays, then shrinks back in two phases. Each step moves the markers in red and no others.
 
-| Quantity | Module | Written by | In Newton |
-|---|---|---|---|
-| reserved | backing | `reserve` | the maximum `nworld` a prototype may ever reach; see [virtual and physical memory](memory.md) |
-| mapped | backing | `map`, `unmap` | pages behind the worlds in use |
-| ready | fields | `publish_ready`, `resize_backing` | `ready_count`, the source for contact and CCD capacities |
-| protected | consumer | a device int32 that the storage borrows | the live world count |
-| admissible | directory | `publish_admissible_slots`, `withdraw_admissible_slots` | slots the reset path may fill |
-| live | directory | `publish`, `publish_compaction` | `live_count`, the `nworld` the step kernels follow |
-| execution count | consumer | any device int32 bound to a graph node | the `CountParameter` bound to each MJWarp launch |
+<div class="gc-widget" data-widget="quantities"></div>
 
-<div class="gc-widget" data-widget="backing"></div>
-<div class="gc-fallback">
+Three of the markers are the same number in Newton and still worth telling apart, because different code reads them at different times:
 
-![Pages are mapped one at a time and the ready marker follows each successful mapping](/img/backing.svg)
+- **live** is what the directory published at the end of the last batch.
+- **protected** is the same device scalar, seen from the storage's side as the floor a shrink may not cross. The storage borrows it; it never writes it.
+- **execution** is the count consumed by the updater before the dependent kernels. The figure pauses between publication and that update to show the distinction. Newton places the update after reset publication in the same replay. A previous execution count is not permission to access a withdrawn tail.
 
-</div>
+**Admissible** is the directory's permission to place a world. **Ready** certifies accessible storage, not initialized values. **Mapped** records the physical backing. **Reserved** is the address range, fixed until release. Growth maps and grants access, then publishes readiness and admission. Initialization must complete before publishing a live world.
 
-Mapping bytes does not make slots ready. Readiness does not make slots live. Liveness does not initialize them. Each transition is an explicit operation. This is what allows storage to grow while a captured graph is replaying.
+Deferred shrink first lowers admission and readiness in GPU stream order. The pages remain mapped until earlier readers complete; reclaim polls their completion and then unmaps. It introduces no CPU reader wait, but the unmap calls still take host time. The separate `resize_backing` path uses blocking maintenance. All future readers must obey the accepted smaller prefix.

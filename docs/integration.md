@@ -393,7 +393,7 @@ The discovery pass omits the executable's count-updater operations. The final pa
 
 </details>
 
-[Read the actual capture function](https://github.com/ooctipus/newton/blob/69f47697e6810bfd74c28182443f3f8c1ca643b1/newton/_src/solvers/mujoco/worlds.py#L886) and [its native-physics recorder](https://github.com/ooctipus/newton/blob/69f47697e6810bfd74c28182443f3f8c1ca643b1/newton/_src/solvers/mujoco/worlds.py#L510).
+[Read the actual capture function](https://github.com/ooctipus/newton/blob/ed0a89a1b3a998322d43a34fb016e3c4e7ae592d/newton/_src/solvers/mujoco/worlds.py#L910) and [its native-physics recorder](https://github.com/ooctipus/newton/blob/ed0a89a1b3a998322d43a34fb016e3c4e7ae592d/newton/_src/solvers/mujoco/worlds.py#L530).
 
 ### Why are there three counts?
 
@@ -419,7 +419,14 @@ The example assumes there is already room for B in the second batch. When there 
 
 `mujoco_worlds_grow_backing` maps physical memory into more of the reserved address range. Newton grows persistent and temporary storage together, initializes newly usable contact fields from MJWarp's defaults, and publishes only a prefix supported by all required owners. New world state is initialized when admitting the reset requests. Fresh suffix mappings can use GPU stream ordering without joining existing readers on the CPU. The mapping and permission calls still take CPU time.
 
-`mujoco_worlds_resize_backing` can shrink storage. **Shrinking waits for conflicting GPU work before it unmaps memory.** The caller supplies every stream using that memory and excludes new submissions during the change. Temporary storage follows the same retirement rules as persistent storage.
+There are now two ways to shrink:
+
+- `mujoco_worlds_resize_backing` joins the supplied readers on the CPU, changes backing and publishes readiness. **The current IsaacLab keyboard reset path still uses this blocking resize policy.**
+- `mujoco_worlds_withdraw_backing` lowers admission and readiness in GPU stream order, retaining the pages. `mujoco_worlds_reclaim_backing` polls completion and returns `False` while readers are pending; once they finish, it unmaps the withdrawn suffix. Surviving-prefix physics can continue. The unmap calls still run on the CPU and have a cost.
+
+The deferred path requires every prior reader stream and excludes concurrent submissions while establishing the ordering. Later readers must respect the smaller prefix. Only one retirement batch may be pending; growth, resize and capture must wait until it is resolved. `mujoco_worlds_cancel_backing_retirement` polls completion and retains the mappings; it does not restore the larger ready count. Ordered growth can publish that capacity again afterwards. Temporary storage follows the same rules as persistent storage.
+
+Fresh mapping avoids an explicit reader join only for addresses beyond the historical mapping frontier. Remapping previously used addresses still requires maintenance. Neither **host** nor **no reader join** means that driver work is free or guaranteed to overlap physics.
 
 Memory changes happen outside graph replay. The array's virtual starting address stays fixed, allowing the recorded operations to keep using it. Creating worlds still requires enough usable storage within the configured budget. Closing the population requires retiring its graph and completing all readers before releasing backing.
 
@@ -484,7 +491,7 @@ def joint_pos(env, joints):
 
 **What changed:** the term receives a selection instead of finding an asset. Both return joint positions in the task's coordinate convention. The selection resolves each environment's current prototype and array row, so the term still works after reset or compaction. The configuration supplies `params={"joints": ROBOT_Q}`.
 
-[Earlier observation](https://github.com/ooctipus/IsaacLab/blob/2b8d48d010f8bbf2caedbde060b7b18e66dd5053/source/isaaclab/isaaclab/envs/mdp/observations.py) · [Current task observation](https://github.com/ooctipus/IsaacLab/blob/efb20421649496eef9b4f40b32613b913dabed70/source/isaaclab_tasks/isaaclab_tasks/contrib/keyboard/mdp/observations.py). Excerpts omit type annotations.
+[Earlier observation](https://github.com/ooctipus/IsaacLab/blob/2b8d48d010f8bbf2caedbde060b7b18e66dd5053/source/isaaclab/isaaclab/envs/mdp/observations.py) · [Current task observation](https://github.com/ooctipus/IsaacLab/blob/4d70372c90e58c821541212849dfa41b846483eb/source/isaaclab_tasks/isaaclab_tasks/contrib/keyboard/mdp/observations.py). Excerpts omit type annotations.
 
 Joint velocities use the same selection pattern:
 
@@ -612,12 +619,12 @@ The keyboard configuration also sets `resampling_time_range=None`. This samples 
 
 ## Code to review {#source-snapshot}
 
-These links pin the published implementation described above. Start with the source files for each layer's responsibility; the full comparisons also include tests and supporting changes.
+These links pin one published set of implementations. IsaacLab’s dependency overrides and lockfile select the GPU Components, Newton and MJWarp commits listed here; its installation guide selects the matching custom Warp wheel. Start with the source files for each layer's responsibility; the full comparisons also include tests and supporting changes.
 
 - **MJWarp:** [forward.py](https://github.com/ooctipus/mujoco_warp/blob/34e044b58f1292121e0a906a5e76d96993097341/mujoco_warp/_src/forward.py) owns numerical operations and their temporary allocations; [io.py](https://github.com/ooctipus/mujoco_warp/blob/34e044b58f1292121e0a906a5e76d96993097341/mujoco_warp/_src/io.py) defines native field layouts, defaults and state transfer. The [integration comparison](https://github.com/ooctipus/mujoco_warp/compare/d94c382698769968d30bbae333703cf84a2bcb9c...34e044b58f1292121e0a906a5e76d96993097341) starts from a review baseline with sleeping and independent numerical changes already applied, so they are excluded from this diff. It is not a comparison against untouched main.
-- **Newton:** [worlds.py](https://github.com/ooctipus/newton/blob/69f47697e6810bfd74c28182443f3f8c1ca643b1/newton/_src/solvers/mujoco/worlds.py) prepares prototype storage, records the graph and orders reset, movement and physics. The [main-to-branch comparison](https://github.com/ooctipus/newton/compare/009158e62b862b3b9d829397d6db583515ae1271...69f47697e6810bfd74c28182443f3f8c1ca643b1) includes work beyond this bridge.
+- **Newton:** [worlds.py](https://github.com/ooctipus/newton/blob/ed0a89a1b3a998322d43a34fb016e3c4e7ae592d/newton/_src/solvers/mujoco/worlds.py) prepares prototype storage, records the graph and orders reset, movement and physics. The [main-to-branch comparison](https://github.com/ooctipus/newton/compare/009158e62b862b3b9d829397d6db583515ae1271...ed0a89a1b3a998322d43a34fb016e3c4e7ae592d) includes work beyond this bridge.
 - **Custom Warp:** [capture_allocation.py](https://github.com/ooctipus/warp/blob/52da84604e541b77cc0433b86385de5edb620abc/warp/_src/capture_allocation.py) records allocation requests, supplies prepared arrays and checks reuse ordering. The [main-to-branch comparison](https://github.com/ooctipus/warp/compare/500272ef1c27756788526fd888da089990dd6b83...52da84604e541b77cc0433b86385de5edb620abc) also covers changing counts and bounded memory operations. This repository requires access.
-- **GPU Components:** [package source](https://github.com/ooctipus/gpu-components/tree/ec924032fafbe733931d14c2ddfc9f300049c574/src/gpu_components) contains `fields.py`, `graph.py`, `directory.py` and `backing.py`: typed storage, graph bindings, instance lookup and physical backing. This is the full source, not just the latest Warp-compatibility diff. The repository is private.
-- **IsaacLab task example:** [keyboard source](https://github.com/ooctipus/IsaacLab/tree/efb20421649496eef9b4f40b32613b913dabed70/source/isaaclab_tasks/isaaclab_tasks/contrib/keyboard) contains the configuration, selections and MDP terms shown here; [keyboard_worlds.py](https://github.com/ooctipus/IsaacLab/blob/efb20421649496eef9b4f40b32613b913dabed70/source/isaaclab_tasks/isaaclab_tasks/contrib/keyboard/keyboard_worlds.py) sends reset requests to Newton. Its [develop-to-branch comparison](https://github.com/ooctipus/IsaacLab/compare/2b8d48d010f8bbf2caedbde060b7b18e66dd5053...efb20421649496eef9b4f40b32613b913dabed70) still includes baseline implementations and optional task optimizations. **It is not a minimal integration patch.**
+- **GPU Components:** [package source](https://github.com/ooctipus/gpu-components/tree/6cc307cd5066dbd434dc6e7fc1b21b6327e2100f/src/gpu_components) contains `fields.py`, `graph.py`, `directory.py` and `backing.py`: typed storage, graph bindings, instance lookup and physical backing. This is the full source, not just the latest Warp-compatibility diff. The repository is private.
+- **IsaacLab task example:** [keyboard source](https://github.com/ooctipus/IsaacLab/tree/4d70372c90e58c821541212849dfa41b846483eb/source/isaaclab_tasks/isaaclab_tasks/contrib/keyboard) contains the configuration, selections and MDP terms shown here; [keyboard_worlds.py](https://github.com/ooctipus/IsaacLab/blob/4d70372c90e58c821541212849dfa41b846483eb/source/isaaclab_tasks/isaaclab_tasks/contrib/keyboard/keyboard_worlds.py) sends reset requests to Newton. Its [develop-to-branch comparison](https://github.com/ooctipus/IsaacLab/compare/2b8d48d010f8bbf2caedbde060b7b18e66dd5053...4d70372c90e58c821541212849dfa41b846483eb) still includes baseline implementations and optional task optimizations. **It is not a minimal integration patch.**
 
 This integration requires the custom Warp capture implementation and CUDA virtual-memory support. Newton admits the supported keyboard configuration: the Newton solver, implicit-fast integrator and MJWarp's own collision path. Ordinary MJWarp retains its other numerical paths; this does not mean every path can be used by the growable integration. An unseen topology or changed model layout requires new preparation.

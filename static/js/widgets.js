@@ -80,8 +80,9 @@
     }
     function compact(k) {
       const p = PROTOS[k]; const live = S.rows[k].map((h, r) => (h ? { ...h, from: r } : null)).filter(Boolean);
-      const moves = live.filter((h) => h.from >= live.length).length; const packed = Array(p.cap).fill(null);
-      live.forEach((h, i) => (packed[i] = { id: h.id, gen: h.gen, fresh: false }));
+      const tail = live.filter((h) => h.from >= live.length), moves = tail.length;
+      const packed = S.rows[k].map((h, r) => r < live.length && h ? { ...h, fresh: false } : null);
+      for (let r = 0; r < live.length; r++) if (!packed[r]) { const h = tail.shift(); packed[r] = { id: h.id, gen: h.gen, fresh: false }; }
       S.rows[k] = packed; S.dense[k] = true; S.seq += 1;
       say(`Compaction (${p.name}): ${moves} world(s) moved into the lowest slots. Identities and generations unchanged. Live slots are now [0, ${live.length}).`);
       render();
@@ -391,30 +392,32 @@
       { name: "G1 storage", stride: 24576, color: "#7c3aed" },
     ].map((st) => ({ ...st, pages: BUDGET, slots: Math.floor((BUDGET * GRANULE * 1048576) / st.stride), plan: `planned max = 32 MiB ÷ ${st.stride} B` }));
     // physical handles: id -> {owner: storeIndex|null, vslot: page index|null}; spare = owner null but allocated
-    const S = { handles: [], nextHandle: 0, mapped: STORES.map(() => []) , joined: false };
+    const S = { handles: [], nextHandle: 0, mapped: STORES.map(() => []), highWater: [0, 0], joined: false, epoch: 0 };
     const log = logPanel(); const figure = el("div", { class: "gc-figure" }); const stats = el("div", { class: "gc-stats" });
     const retained = () => S.handles.length;
     const spare = () => S.handles.filter((h) => h.owner === null);
     function acquire() { const sp = spare(); if (sp.length) return sp[0]; if (retained() >= BUDGET) return null; const h = { id: S.nextHandle++, owner: null, vslot: null }; S.handles.push(h); return h; }
     function grow(k) {
       const st = STORES[k]; const next = S.mapped[k].length;
+      if (S.joined) { log.add("Resolve the pending retirement before another capacity change.", "bad"); return; }
+      const historical = next < S.highWater[k];
       if (next >= st.pages) { log.add(`${st.name}: all ${st.pages} pages are mapped; this storage now holds the entire budget and all ${st.slots.toLocaleString()} planned slots are ready. Nothing is left for the other storage.`, "bad"); return; }
       const h = acquire();
       if (!h) { log.add(`map (${st.name}) → MemoryError before any driver call: ${retained()} handles retained, budget ${BUDGET}. Nothing changed.`, "bad"); render(); return; }
       const reused = S.handles.includes(h) && h.id < S.nextHandle - 1 && spare().includes(h);
-      h.owner = k; h.vslot = next; S.mapped[k].push(h);
-      log.add(`map (${st.name}) → virtual page ${next} at base + ${next * GRANULE} MiB ← physical handle #${h.id}${reused ? " (taken from the pool)" : " (new, cuMemCreate)"}. Virtual address of every slot unchanged. No reader join: never-mapped range.`, "good");
+      h.owner = k; h.vslot = next; S.mapped[k].push(h); S.highWater[k] = Math.max(S.highWater[k], next + 1);
+      log.add(`map (${st.name}) → virtual page ${next} at base + ${next * GRANULE} MiB ← physical handle #${h.id}${reused ? " (taken from the pool)" : " (new, cuMemCreate)"}. Virtual address of every slot unchanged. ${historical ? "Historical address reuse: joined maintenance is required." : "Fresh addresses: no explicit reader join; driver cost remains."}`, "good");
       render();
     }
     function shrink(k) {
-      const st = STORES[k]; if (!S.mapped[k].length) { log.add(`${st.name}: nothing mapped.`, "bad"); return; }
-      S.joined = true; render();
-      log.add(`backing.maintenance (${st.name}): joining every named stream before cuMemUnmap…`);
-      setTimeout(() => { const h = S.mapped[k].pop(); h.owner = null; h.vslot = null; S.joined = false;
-        log.add(`unmap (${st.name}) → virtual page ${S.mapped[k].length} unmapped; handle #${h.id} goes to the pool: unmapped, owned by no prototype, still counted against the budget until trim. The virtual range stays reserved; pointers stay valid.`, "good"); render(); }, 800);
+      const st = STORES[k]; if (S.joined) return; if (!S.mapped[k].length) { log.add(`${st.name}: nothing mapped.`, "bad"); return; }
+      const epoch = S.epoch; S.joined = true; render();
+      log.add(`withdraw_backing (${st.name}): ready lowered as an ordered device write, completion event recorded; waiting for it to pass without blocking…`);
+      setTimeout(() => { if (epoch !== S.epoch) return; const h = S.mapped[k].pop(); h.owner = null; h.vslot = null; S.joined = false;
+        log.add(`unmap (${st.name}) → virtual page ${S.mapped[k].length} unmapped; handle #${h.id} goes to the pool: unmapped, owned by no prototype, still counted against the budget until trim. The virtual range stays reserved; only the remaining mapped prefix may be accessed.`, "good"); render(); }, 800);
     }
-    function trim() { const sp = spare(); if (!sp.length) { log.add("trim → no spare handles to release.", "bad"); return; } S.handles = S.handles.filter((h) => h.owner !== null); log.add(`trim → cuMemRelease on ${sp.length} spare handle(s); budget use drops to ${retained()}.`, "good"); render(); }
-    function reset() { S.handles = []; S.nextHandle = 0; S.mapped = STORES.map(() => []); S.joined = false; for (let i = 0; i < BUDGET; i++) S.handles.push({ id: S.nextHandle++, owner: null, vslot: null }); log.add("reserve → two contiguous virtual ranges, nothing mapped. cuMemCreate × 16 → the whole budget is created once, at startup, and waits in the pool."); for (let i = 0; i < 4; i++) grow(0); for (let i = 0; i < 3; i++) grow(1); }
+    function trim() { const sp = spare(); if (!sp.length) { log.add("trim → no spare handles to release.", "bad"); return; } S.handles = S.handles.filter((h) => h.owner !== null); log.add(`trim → cuMemRelease on ${sp.length} spare handle(s) inside completed maintenance; budget use drops to ${retained()}.`, "good"); render(); }
+    function reset() { S.handles = []; S.nextHandle = 0; S.mapped = STORES.map(() => []); S.highWater = [0, 0]; S.joined = false; S.epoch += 1; for (let i = 0; i < BUDGET; i++) S.handles.push({ id: S.nextHandle++, owner: null, vslot: null }); log.add("reserve → two contiguous virtual ranges, nothing mapped. This drawing prewarms 16 handles for illustration; the package normally creates handles as mapping needs them."); for (let i = 0; i < 4; i++) grow(0); for (let i = 0; i < 3; i++) grow(1); }
     let render = function () {
       figure.innerHTML = "";
       const W = 860, x0 = 170, gw = 42; const s = svg("svg", { viewBox: `0 0 ${W} 320`, width: "100%" });
@@ -450,17 +453,17 @@
           s.appendChild(svg("path", { d: `M${x + (gw - 4) / 2} ${py} C ${x + (gw - 4) / 2} ${py - 40}, ${vx} ${vy + 40}, ${vx} ${vy}`, fill: "none", stroke: STORES[h.owner].color, "stroke-width": 1.4, opacity: 0.7 }));
         }
       }
-      s.appendChild(svg("text", { x: 16, y: py + 52, "font-size": 10, fill: C.muted, text: "yellow: in the pool, created at startup, unmapped, belongs to no prototype · colored: mapped into the storage of that color · white dashed: released by trim, must be created again" }));
-      if (S.joined) s.appendChild(svg("text", { x: W - 16, y: py + 52, "text-anchor": "end", "font-size": 11, fill: C.bad, text: "maintenance: joining readers…" }));
+      s.appendChild(svg("text", { x: 16, y: py + 52, "font-size": 10, fill: C.muted, text: "yellow: retained in the pool, unmapped, belongs to no prototype · colored: mapped into the storage of that color · white dashed: released by trim, must be created again" }));
+      if (S.joined) s.appendChild(svg("text", { x: W - 16, y: py + 52, "text-anchor": "end", "font-size": 11, fill: C.bad, text: "withdrawal pending: waiting for the completion event…" }));
       s.appendChild(svg("text", { x: 16, y: 310, "font-size": 10, fill: C.muted, text: "Each storage could hold the whole budget alone; together they reserve 64 MiB against 32 MiB of memory. Handles are interchangeable across storages; virtual pages never move." }));
       figure.appendChild(s);
       stats.innerHTML = "";
       const vtotal = STORES.reduce((a, st) => a + st.pages * GRANULE, 0), mapped = S.handles.filter((h) => h.owner !== null).length;
-      [["virtual reserved", `${vtotal} MiB (costs nothing)`], ["physical mapped", `${mapped * GRANULE} MiB`], ["in the pool (unmapped, still counted)", `${spare().length * GRANULE} MiB`], ["budget in use", `${retained()} / ${BUDGET} handles`]].forEach(([k, v]) => stats.appendChild(stat(k, v)));
+      [["virtual reserved", `${vtotal} MiB (no payload backing)`], ["physical mapped", `${mapped * GRANULE} MiB`], ["in the pool (unmapped, still counted)", `${spare().length * GRANULE} MiB`], ["budget in use", `${retained()} / ${BUDGET} handles`]].forEach(([k, v]) => stats.appendChild(stat(k, v)));
     };
-    const growBtns = [button("Map cartpole pages (host, no join)", () => grow(0), true), button("Map G1 pages (host, no join)", () => grow(1), true)];
-    root.appendChild(el("div", { class: "gc-toolbar" }, [growBtns[0], growBtns[1], button("Unmap cartpole tail (host, joins) → pool", () => shrink(0)), button("Unmap G1 tail (host, joins) → pool", () => shrink(1)), button("Trim pool (cuMemRelease)", trim), button("Start over (figure only)", reset)]));
-    const origRender = render; render = function () { origRender(); STORES.forEach((st, k) => { const full = S.mapped[k].length >= st.pages; growBtns[k].disabled = full; growBtns[k].textContent = full ? `${st.name.split(" ")[0]}: reservation fully mapped` : `Map ${st.name.split(" ")[0]} pages (host, no join)`; }); };
+    const growBtns = [button("Map cartpole pages (host)", () => grow(0), true), button("Map G1 pages (host)", () => grow(1), true)];
+    root.appendChild(el("div", { class: "gc-toolbar" }, [growBtns[0], growBtns[1], button("Withdraw + reclaim cartpole tail → pool", () => shrink(0)), button("Withdraw + reclaim G1 tail → pool", () => shrink(1)), button("Trim pool (cuMemRelease)", trim), button("Start over (figure only)", reset)]));
+    const origRender = render; render = function () { origRender(); STORES.forEach((st, k) => { const full = S.mapped[k].length >= st.pages; growBtns[k].disabled = full; growBtns[k].textContent = full ? `${st.name.split(" ")[0]}: reservation fully mapped` : `Map ${st.name.split(" ")[0]} pages (host)`; }); };
     root.appendChild(el("div", { class: "gc-hint", text: "Top: contiguous virtual ranges, one per storage, sized for the maximum population. Bottom: the pool of page handles the budget counts. Curves show which handle backs which virtual page." }));
     root.appendChild(figure); root.appendChild(stats); root.appendChild(log.box);
     reset();
@@ -492,7 +495,7 @@
         { name: "W2 2 banana+franka", bytes: 944, slots: 277 },
         { name: "W3 franka", bytes: 688, slots: 381 },
       ],
-      budget: { min: 16384, max: 262144, step: 8192, init: 65536 }, live: [4, 4, 4, 4], GU: 8192, granuleNote: "page drawn as 8 KiB so the figure fits; real pages are 2 MiB",
+      budget: { min: 16384, max: 262144, step: 8192, init: 65536 }, live: [4, 4, 4, 4], GU: 8192, granuleNote: "page drawn as 8 KiB so the figure fits; actual granularity is queried from CUDA",
       fmt: (v) => `${Math.round(v / 1024)} KiB`, unitNote: "bytes; one world is 816, 1,488, 944 or 688 B",
       stack: { GU: 22, BUDGET: 5, mapped: [1, 1, 1, 1], init: [3, 2, 3, 4], sw: 30,
         protos: [{ bytes: 6, grow: 4 }, { bytes: 11, grow: 2 }, { bytes: 7, grow: 3 }, { bytes: 5, grow: 4 }],
@@ -540,13 +543,13 @@
       const steps = [], add = (where, text) => steps.push({ where, text });
       const tgt = targets();
       add("host", `targets from the budget and the weights: ${splitText()}.`);
-      // 1. ended episodes: replace in place where the prototype still wants worlds, destroy the rest
+      // 1. ended episodes: REPLACE (same identity, new slot) where the prototype still wants worlds, DESTROY the rest
       const ended = S.live.map((n) => Math.round(n * S.ending));
       let live = S.live.slice();
       const keep = ended.map((e, k) => Math.min(e, Math.max(0, tgt[k] - (live[k] - e))));
       const destroyed = ended.map((e, k) => e - keep[k]);
       live = live.map((n, k) => n - destroyed[k]);
-      add("graph", `directory batch ${S.seq}: ${ended.reduce((a, v) => a + v, 0)} episodes ended. REPLACE in place ${names(keep, String) || "none"}; DESTROY ${names(destroyed, String) || "none"}. Slots and pages untouched.`);
+      add("graph", `directory batch ${S.seq}: ${ended.reduce((a, v) => a + v, 0)} episodes ended. REPLACE ${names(keep, String) || "none"}: same identity, next generation, a fresh slot each, the old slots become holes; DESTROY ${names(destroyed, String) || "none"}. Compaction in the same batch closes the holes. Pages untouched.`);
       // 2. does any prototype need pages beyond its ready prefix?
       const want = targetG();
       const extra = want.map((g, k) => Math.max(0, g - S.mapped[k]));
@@ -563,9 +566,9 @@
           const donors = take.map((t, k) => t ? k : -1).filter((k) => k >= 0);
           if (donors.length) {
             add("graph", `compaction on ${donors.map((k) => shortName(P[k])).join(", ")}: live worlds moved below slot ${donors.map((k) => Math.floor(((S.mapped[k] - take[k]) * GU) / P[k].bytes)).join(" / ")} so the tail pages are empty.`);
-            add("join", `join every stream that may still read those tails. The graph pauses here; this is the only stall.`);
+            add("host", `withdraw_backing on ${donors.map((k) => shortName(P[k])).join(", ")}: ready lowered as an ordered device write after waiting on the reader streams; completion event recorded; pages stay mapped. No explicit CPU reader wait is performed; later reclaim still has driver cost.`);
             donors.forEach((k) => { S.mapped[k] -= take[k]; S.pool += take[k]; });
-            add("host", `resize_backing: unmap ${names(take, (v) => `${v} page(s) of`)}. ${S.pool} handle(s) now in the pool, still counted.`);
+            add("host", `reclaim_backing, once the event has passed: unmap ${names(take, (v) => `${v} page(s) of`)}. ${S.pool} handle(s) now in the pool, still counted. The delay depends on reader completion and how often the host polls.`);
             avail += take.reduce((a, v) => a + v, 0);
           }
         }
@@ -573,7 +576,7 @@
         P.map((p, k) => k).sort((i, j) => P[j].bytes - P[i].bytes).forEach((k) => { const g = Math.min(extra[k], left); got[k] = g; left -= g; });
         const gotTotal = got.reduce((a, v) => a + v, 0), fromPool = Math.min(S.pool, gotTotal); S.pool -= fromPool;
         got.forEach((g, k) => (S.mapped[k] += g));
-        if (gotTotal) add("host", `map_backing + publish_ready: ${names(got, (v) => `${v} page(s) onto`)}${fromPool ? `, ${fromPool} taken from the pool` : ""}${gotTotal - fromPool ? `, ${gotTotal - fromPool} new (cuMemCreate)` : ""}. No join: fresh addresses. Ready prefixes now ${P.map((p, k) => `${ready(k)} ${shortName(p)}`).join(", ")}.`);
+        if (gotTotal) add("host", `map_backing + publish_ready: ${names(got, (v) => `${v} page(s) onto`)}${fromPool ? `, ${fromPool} taken from the pool` : ""}${gotTotal - fromPool ? `, ${gotTotal - fromPool} new (cuMemCreate)` : ""}. Fresh addresses need no reader join; historical remapping requires maintenance. Ready prefixes now ${P.map((p, k) => `${ready(k)} ${shortName(p)}`).join(", ")}.`);
         const shortfall = extra.reduce((a, v, k) => a + v - got[k], 0);
         if (shortfall) { const holders = P.map((p, k) => k).filter((k) => S.mapped[k] > want[k]); add("none", `${names(extra.map((v, k) => v - got[k]), (v) => `${v} more page(s) for`)} wanted, but ${holders.map((k) => shortName(P[k])).join(", ")} still hold${holders.length === 1 ? "s" : ""} live worlds in them. Running episodes are never evicted; the shift completes over the next resets as they end.`); }
       }
@@ -608,7 +611,7 @@
       x = x0; P.forEach((p, k) => { const w = tgt[k] * p.bytes * unit; s.appendChild(svg("rect", { x, y: 106, width: w, height: 16, fill: p.color, opacity: 0.5 })); x += w; });
       // physical layer: pages per prototype, pool, unused budget
       const BG = budgetG(), gw = barW / Math.max(BG, mappedG() + S.pool);
-      s.appendChild(svg("text", { x: x0, y: 146, "font-size": 12, fill: C.text, "font-weight": "600", text: `physical: ${mappedG()} page(s) mapped, ${S.pool} in the pool (created at startup, unmapped), budget ${BG} (${SC.granuleNote})` }));
+      s.appendChild(svg("text", { x: x0, y: 146, "font-size": 12, fill: C.text, "font-weight": "600", text: `physical: ${mappedG()} page(s) mapped, ${S.pool} in the pool (unmapped; warm pool in this example), budget ${BG} (${SC.granuleNote})` }));
       x = x0;
       P.forEach((p, k) => { for (let g = 0; g < S.mapped[k]; g++) { s.appendChild(svg("rect", { x, y: 154, width: Math.max(1, gw - 2), height: 18, rx: 2, fill: p.color, stroke: "#1f2937" })); x += gw; } });
       for (let g = 0; g < S.pool; g++) { s.appendChild(svg("rect", { x, y: 154, width: Math.max(1, gw - 2), height: 18, rx: 2, fill: "#fde68a", stroke: "#1f2937" })); x += gw; }
@@ -636,7 +639,7 @@
     ctrls.push(el("div", { class: "gc-ctrl" }, [l3, s3_i, s3_o]));
     ctrls.push(button("Reset (run one batch)", reset, true), button("Start over", () => { S.live = SC.live.slice(); S.mapped = SC.live.map((n, k) => gFor(n, k)); refill(); S.seq = 0; S.steps = null; render(); }));
     root.appendChild(el("div", { class: "gc-toolbar gc-toolbar-col" }, ctrls));
-    root.appendChild(el("div", { class: "gc-hint", text: (N === 2 ? "Set a budget and how it is split between the two prototypes, then press Reset. " : "Set a budget and the weight of each world prototype, as in a clone plan, then press Reset. ") + "Every step the reset takes is listed below the figure, tagged with where it runs: inside the replayed graph, on the host between replays, or a join that stalls the graph. Move the split a long way to force the host steps; leave it alone to see the steady state touch nothing but the directory." }));
+    root.appendChild(el("div", { class: "gc-hint", text: (N === 2 ? "Set a budget and how it is split between the two prototypes, then press Reset. " : "Set a budget and the weight of each world prototype, as in a clone plan, then press Reset. ") + "Every step the reset takes is listed below the figure, tagged with where it runs: inside the replayed graph, on the host between replays, or an explicit reader join. Host operations still have a cost. Move the split a long way to force the host steps; leave it alone to see the steady state touch nothing but the directory." }));
     root.appendChild(figure); root.appendChild(stats); root.appendChild(stepBox); render();
   }
 
@@ -648,11 +651,11 @@
     const GU = ST.GU, BUDGET = ST.BUDGET;
     // every prototype reserves the whole budget: cap = budget ÷ bytes per world
     const P = ST.protos.map((p, k) => ({ ...p, cap: Math.floor((BUDGET * GU) / p.bytes), name: SC.protos[k].name, color: PALETTE[k] })), N = P.length;
-    const S = { rows: [], mapped: [], pool: 0, gen: {}, nextId: 0, dense: [], seq: 0, retired: [] };
+    const S = { rows: [], mapped: [], highWater: [], pending: [], pool: 0, gen: {}, nextId: 0, dense: [], seq: 0, retired: [] };
     const figure = el("div", { class: "gc-figure" }); const stats = el("div", { class: "gc-stats" }); const note = el("div", { class: "gc-note" });
     const say = (m, bad) => { note.textContent = m; note.classList.toggle("gc-note-bad", !!bad); };
     const live = (k) => S.rows[k].filter(Boolean).length;
-    const readySlots = (k) => Math.min(P[k].cap, Math.floor((S.mapped[k] * GU) / P[k].bytes));
+    const readySlots = (k) => Math.min(P[k].cap, Math.floor(((S.mapped[k] - (S.pending[k] || 0)) * GU) / P[k].bytes));
     const freeSlots = (k) => { const o = []; for (let r = 0; r < readySlots(k); r++) if (!S.rows[k][r]) o.push(r); return o; };
     const granulesMapped = () => S.mapped.reduce((a, v) => a + v, 0);
     const granulesUsed = () => granulesMapped() + S.pool;
@@ -661,7 +664,7 @@
       if (!free.length) { say(`${p.name}: no free slot with pages behind it. Map more pages first.`, true); render(); return; }
       const slot = S.dense[k] ? free[0] : free[(S.seq * 7919 + free.length * 31) % free.length];
       const id = S.nextId++; S.gen[id] = 1; S.rows[k][slot] = { id, gen: 1 }; S.dense[k] = false; S.seq += 1;
-      say(`CREATE ${p.name} world ${id} in slot ${slot}. Only the directory layer changed; the slot's address and its pages were already there.`); render();
+      say(`CREATE ${p.name} world ${id} in slot ${slot}. The task initializes the payload and publishes its directory entry; the slot address and mappings stay unchanged.`); render();
     }
     function destroy(k, slot) {
       const h = S.rows[k][slot]; if (!h) return; S.rows[k][slot] = null; S.gen[h.id] += 1; S.retired.push({ id: h.id, gen: h.gen, slot, k }); S.dense[k] = false; S.seq += 1;
@@ -669,27 +672,37 @@
     }
     function compact(k) {
       const p = P[k], lv = S.rows[k].map((h, r) => (h ? { ...h, from: r } : null)).filter(Boolean);
-      const moves = lv.filter((h) => h.from >= lv.length).length; const packed = Array(p.cap).fill(null); lv.forEach((h, i) => (packed[i] = { id: h.id, gen: h.gen }));
+      const tail = lv.filter((h) => h.from >= lv.length), moves = tail.length;
+      const packed = S.rows[k].map((h, r) => r < lv.length ? h : null);
+      for (let r = 0; r < lv.length; r++) if (!packed[r]) { const h = tail.shift(); packed[r] = { id: h.id, gen: h.gen }; }
       S.rows[k] = packed; S.dense[k] = true; S.seq += 1;
       say(`Compaction (${p.name}): ${moves} world(s) copied into the lowest slots. Data moved between slots; addresses and pages did not move.`); render();
     }
     function map(k) {
       const p = P[k], need = Math.ceil((p.grow * p.bytes) / GU);
+      if (S.pending[k]) { say(`${p.name}: a withdrawal is pending; reclaim or cancel it before mapping.`, true); return; }
       if (readySlots(k) >= p.cap) { say(`${p.name}: the whole reservation is already mapped.`, true); return; }
       const fromPool = Math.min(S.pool, need), fresh = need - fromPool;
       if (granulesUsed() + fresh > BUDGET) { say(`map (${p.name}): MemoryError before any driver call; ${fresh} new handle(s) would exceed the budget of ${BUDGET} (${S.pool} in the pool is not enough). Unmap another prototype's tail first.`, true); render(); return; }
-      S.pool -= fromPool; S.mapped[k] += need;
-      say(`map_backing (${p.name}): ${need} page(s) mapped${fromPool ? `, ${fromPool} taken from the pool` : ""}${fresh ? `, ${fresh} new (cuMemCreate)` : ""}, then publish_ready. Host call between replays, no join. The virtual layer did not change; the physical layer grew.`); render();
+      const historical = S.mapped[k] < S.highWater[k];
+      S.pool -= fromPool; S.mapped[k] += need; S.highWater[k] = Math.max(S.highWater[k], S.mapped[k]);
+      say(`map_backing (${p.name}): ${need} page(s) mapped${fromPool ? `, ${fromPool} taken from the pool` : ""}${fresh ? `, ${fresh} new (cuMemCreate)` : ""}, then publish_ready. Host calls change mapping, then GPU publication changes readiness. The virtual range stays fixed. ${historical ? "Historical addresses require joined maintenance." : "Fresh addresses need no explicit reader join; driver cost remains."}`); render();
     }
     function unmap(k) {
       const p = P[k], need = Math.ceil((p.grow * p.bytes) / GU);
+      if (S.pending[k]) { say(`${p.name}: a withdrawal is already pending; reclaim it first.`, true); return; }
       const newReady = Math.max(0, Math.floor(((S.mapped[k] - need) * GU) / p.bytes));
-      if (S.mapped[k] - need < 0 || (live(k) > 0 && S.rows[k].slice(newReady).some(Boolean))) { say(`${p.name}: cannot unmap slots that hold live worlds. Destroy or compact first.`, true); return; }
-      S.mapped[k] -= need; S.pool += need; say(`resize_backing (${p.name}), joined: streams joined, readiness lowered, then ${need} page(s) unmapped. Their page handles go to the pool: owned by no prototype, still counted against the budget. The virtual layer is unchanged; slots ≥ ${newReady} have no pages again.`); render();
+      if (S.mapped[k] - need < 0 || (live(k) > 0 && S.rows[k].slice(newReady).some(Boolean))) { say(`${p.name}: cannot withdraw slots that hold live worlds. Destroy or compact first.`, true); return; }
+      S.pending[k] = need; say(`withdraw_backing (${p.name}): ready lowered to ${newReady} slots as an ordered device write after waiting on the reader streams; a completion event is recorded. The ${need} page(s) stay mapped until reclaim. No explicit CPU reader wait; this drawing shows the accepted GPU result.`); render();
+    }
+    function reclaim(k) {
+      const p = P[k]; if (!S.pending[k]) { say(`${p.name}: nothing withdrawn.`, true); return; }
+      const need = S.pending[k]; S.pending[k] = 0; S.mapped[k] -= need; S.pool += need;
+      say(`reclaim_backing (${p.name}): the completion event has passed, so ${need} page(s) are unmapped into the pool. No CPU join; had the event not passed, this would return pending and nothing would change.`); render();
     }
     function lookupStale() { if (!S.retired.length) { say("Destroy a world first.", true); return; } const h = S.retired[S.retired.length - 1]; say(`location(${h.id}, ${h.gen}) → invalid: identity ${h.id} is at generation ${S.gen[h.id]}.`, true); }
     function trim() { if (!S.pool) { say("trim: the pool is empty.", true); return; } const n = S.pool; S.pool = 0; say(`trim: cuMemRelease on ${n} pooled handle(s); the budget in use drops by ${n}.`); render(); }
-    function reset() { S.rows = P.map((p) => Array(p.cap).fill(null)); S.mapped = ST.mapped.slice(); S.pool = BUDGET - ST.mapped.reduce((a, v) => a + v, 0); S.gen = {}; S.nextId = 0; S.dense = P.map(() => true); S.seq = 0; S.retired = []; ST.init.forEach((n, k) => { for (let i = 0; i < n; i++) create(k); }); say(`Three layers per prototype. Directory: which slots hold worlds. Virtual: one contiguous range of addresses, sized to the whole budget of ${BUDGET} pages. Physical: which pages are mapped under it; the rest of the budget was created at startup and waits in the pool.`); render(); }
+    function reset() { S.rows = P.map((p) => Array(p.cap).fill(null)); S.mapped = ST.mapped.slice(); S.highWater = ST.mapped.slice(); S.pending = P.map(() => 0); S.pool = BUDGET - ST.mapped.reduce((a, v) => a + v, 0); S.gen = {}; S.nextId = 0; S.dense = P.map(() => true); S.seq = 0; S.retired = []; ST.init.forEach((n, k) => { for (let i = 0; i < n; i++) create(k); }); say(`Three layers per prototype. Directory: which slots hold worlds. Virtual: one contiguous range of addresses, sized to the whole budget of ${BUDGET} pages. Physical: which pages are mapped under it; this figure starts with a warm spare pool. The package can also create handles on demand.`); render(); }
     function render() {
       figure.innerHTML = "";
       const RH = 100, W = 860, x0 = 150, sw = ST.sw || 38; const s = svg("svg", { viewBox: `0 0 ${W} ${14 + N * RH + 28}`, width: "100%" });
@@ -711,14 +724,14 @@
         const unitW = sw / p.bytes, gW = GU * unitW, totalG = BUDGET;
         s.appendChild(svg("text", { x: 16, y: y + 75, "font-size": 8.5, fill: C.muted, text: `physical · ${S.mapped[k]} of ${totalG} · ${ready} ready` }));
         for (let g = 0; g < totalG; g++) {
-          const gx = x0 + g * gW, m = g < S.mapped[k], gw = Math.min(gW - 3, p.cap * sw - 3 - g * gW);
-          s.appendChild(svg("rect", { x: gx, y: y + 64, width: Math.max(2, gw), height: 16, rx: 3, fill: m ? "#93c5fd" : "none", stroke: m ? "#1f2937" : "#d1d5db", "stroke-dasharray": m ? "" : "3 3" }));
+          const gx = x0 + g * gW, m = g < S.mapped[k], pend = m && g >= S.mapped[k] - (S.pending[k] || 0), gw = Math.min(gW - 3, p.cap * sw - 3 - g * gW);
+          s.appendChild(svg("rect", { x: gx, y: y + 64, width: Math.max(2, gw), height: 16, rx: 3, fill: pend ? "#fde68a" : m ? "#93c5fd" : "none", stroke: m ? "#1f2937" : "#d1d5db", "stroke-dasharray": m ? "" : "3 3" }));
           if (m && gw > 26) s.appendChild(svg("text", { x: gx + gw / 2, y: y + 75, "text-anchor": "middle", "font-size": 7.5, fill: "#111827", text: "2 MiB" }));
         }
-        if (ready < p.cap) s.appendChild(svg("text", { x: x0 + ready * sw, y: y + 91, "font-size": 8, fill: C.muted, text: `← slots ${ready}..${p.cap - 1}: reserved, no pages` }));
+        if (ready < p.cap) s.appendChild(svg("text", { x: x0 + ready * sw, y: y + 91, "font-size": 8, fill: C.muted, text: `← slots ${ready}..${p.cap - 1}: ${S.pending[k] ? "not ready; yellow pages still mapped" : "not ready; backing ends at the page boundary"}` }));
       });
       const py = 14 + N * RH + 6;
-      s.appendChild(svg("text", { x: 16, y: py + 11, "font-size": 8.5, fill: C.muted, text: `pool: ${S.pool} created at startup, unmapped` }));
+      s.appendChild(svg("text", { x: 16, y: py + 11, "font-size": 8.5, fill: C.muted, text: `pool: ${S.pool} retained handles, unmapped` }));
       for (let g = 0; g < BUDGET; g++) {
         const gx = x0 + g * 26, state = g < granulesMapped() ? "mapped" : g < granulesUsed() ? "pool" : "free";
         s.appendChild(svg("rect", { x: gx, y: py, width: 22, height: 14, rx: 3, fill: state === "mapped" ? "#93c5fd" : state === "pool" ? "#fde68a" : "none", stroke: state === "free" ? "#d1d5db" : "#1f2937", "stroke-dasharray": state === "free" ? "3 3" : "" }));
@@ -740,13 +753,14 @@
     root.appendChild(el("div", { class: "gc-toolbar" }, [
       act("graph", "Create", create, "Directory batch inside the captured step; replayable. Click a live world to destroy it, the same kind of operation."),
       act("graph", "Compact", compact, "Directory moves inside the captured step; replayable. Data is copied between slots; addresses and pages do not move."),
-      act("host", "Map pages", map, "Driver call on the CPU between replays; no GPU wait, cannot be captured. Takes from the pool first (cheap, cannot fail), else cuMemCreate."),
-      act("join", "Unmap tail", unmap, "Joins every stream, then a driver call. The graph stalls while the CPU waits. Handles go to the pool."),
-      act("host", "Trim pool", (k) => trim(), "cuMemRelease on pooled handles; no GPU wait. The next map must cuMemCreate again and may fail."),
+      act("host", "Map pages", map, "Host map and permission calls. Fresh addresses need no explicit reader join; reusing historical addresses requires maintenance. Uses pooled handles first, otherwise creates within budget. Driver calls can fail."),
+      act("host", "Withdraw tail", unmap, "Host submission orders GPU readiness withdrawal after all supplied readers, then records completion. Pages stay mapped; no CPU reader wait is performed."),
+      act("host", "Reclaim", reclaim, "Polls completion, then issues CPU unmap calls if ready; returns pending otherwise. No explicit CPU reader wait. Handles go to the pool; driver cost remains."),
+      act("host", "Trim pool", (k) => trim(), "Releases pooled handles inside authorized maintenance. That scope must prove completion, by waiting or completed events. Reusing an existing scope adds no second join."),
       act("graph", "Stale lookup", (k) => lookupStale(), "Look up the most recently destroyed handle: the generation check fails."),
       button("Start over (figure only)", reset),
     ]));
-    root.appendChild(el("div", { class: "gc-hint", text: `Pick a prototype, then an action; hover an action for what it does and where it runs. graph = inside the captured step, host = CPU driver call with no GPU wait, join = CPU waits for the GPU first. Each action changes exactly one layer; nothing ever changes the virtual layer. ${ST.note}.` }));
+    root.appendChild(el("div", { class: "gc-hint", text: `Pick a prototype, then an action; hover an action for what it does and where it runs. graph = captured GPU work; host = CPU operation, not a no-wait guarantee. Withdrawn pages stay mapped (yellow) until reclaim. Fresh map needs no reader join; historical remap requires maintenance. The reserved virtual ranges stay fixed for their lifetime. ${ST.note}.` }));
     root.appendChild(figure); root.appendChild(stats); root.appendChild(note); reset();
   }
   /* ------------------------------------------------------------------ */
@@ -778,7 +792,7 @@
       const caption = el("div", { class: "gc-cmp3-caption" }); card.appendChild(caption);
       const r = draw(sv, S.step);
       caption.appendChild(el("span", { class: `gc-tag gc-tag-${r.tag}`, text: r.tag === "none" ? "no-op" : r.tag })); caption.appendChild(document.createTextNode(" " + r.text));
-      [["re-recorded", r.rerecord], ["stalls", r.stalls], ["held", `${r.mem} units`]].forEach(([k, v]) => counters.appendChild(el("span", { class: "gc-cmp3-counter" + ((k !== "held" && v > 0) ? " gc-bad" : ""), text: `${k} ${v}` })));
+      [["re-recorded", r.rerecord], ["CPU joins", r.stalls], ["mapped", `${r.mem} units`]].forEach(([k, v]) => counters.appendChild(el("span", { class: "gc-cmp3-counter" + ((k !== "mapped" && v > 0) ? " gc-bad" : ""), text: `${k} ${v}` })));
       return card;
     }
     // A. one padded Data: 8 slots × 4 units
@@ -836,14 +850,14 @@
       if (k === 1) { cell(s, x0 + 2 + 3 * U, 23, U, 16, "#ffffff", { stroke: "#1f2937" }); text(s, x0 + 4 * GW + 8 + 230, 33, "compaction: slot 5 → slot 3", 10, "#16a34a"); }
       // pool strip
       for (let g = 0; g < 6; g++) cell(s, x0 + g * 30, 78, 28, 12, g < mc + mg ? MAPPED : g < mc + mg + pool ? "#fde68a" : "none", { stroke: "#9ca3af", sw: 0.6 });
-      text(s, x0 + 6 * 30 + 8, 88, `pool: ${pool} created at startup, unmapped · budget 6 pages`, 10);
+      text(s, x0 + 6 * 30 + 8, 88, `pool: ${pool} retained handles, unmapped · budget 6 pages`, 10);
       const out = [
         { tag: "none", text: "Each range is reserved for the whole budget; only 4 pages are mapped. One graph, recorded once." },
         { tag: "graph", text: "DESTROY leaves a hole; compaction copies the tail world down; count becomes 5. Pages stay mapped." },
-        { tag: "host", text: "9 exceeds the 8 ready slots: map one page from the pool, publish readiness, CREATE 3. No GPU wait, no re-record." },
-        { tag: "join", text: "Compact cartpoles to 2, join once, unmap 1 page to the pool, map 2 onto G1, publish. The one stall in the design." },
+        { tag: "host", text: "9 exceeds the 8 ready slots: map one page from the pool, publish readiness, CREATE 3. Fresh addresses: no explicit reader join, no re-record. Host driver cost remains." },
+        { tag: "host", text: "Compact cartpoles to 2, withdraw their tail as an ordered write, reclaim the page into the pool once the readers' event has passed, map 2 onto G1, publish. No CPU join; G1 must wait for donor completion and the subsequent mapping calls." },
       ][k];
-      return { ...out, rerecord: 0, stalls: k === 3 ? 1 : 0, mem: (mc + mg) * 4 };
+      return { ...out, rerecord: 0, stalls: 0, mem: (mc + mg) * 4 };
     }
     function render() {
       figure.innerHTML = ""; title.textContent = EVENTS[S.step];
@@ -857,7 +871,7 @@
     root.appendChild(el("div", { class: "gc-toolbar gc-steptabs" }, tabs));
     root.appendChild(title);
     root.appendChild(figure);
-    root.appendChild(el("div", { class: "gc-hint", text: "Three scenarios, each starting from the same start state, played through three designs. The counters are the cost of that one scenario. graph = inside the captured step; host = CPU driver call, no GPU wait; join = the CPU waits for the GPU; waste and stall mark the costs the other designs pay." }));
+    root.appendChild(el("div", { class: "gc-hint", text: "Three scenarios, each starting from the same start state, played through three designs. The counters are the cost of that one scenario. graph = captured GPU work; host = CPU operation; join = explicit CPU reader wait. Driver costs and capacity dependencies remain. These are illustrative scenarios, not measured performance." }));
     render();
   }
 
@@ -878,10 +892,10 @@
         values: "# at startup, once\nbacking   = backing.prepare(budget_bytes=32 * 2**20)\ndirectory = directory.allocate(slot_limits=(21845, 1365), id_capacity=65536, command_capacity=4096)\ncommands  = directory.allocate_commands(4096)\nresults   = directory.allocate_results(4096)\ncart      = fields.allocate(capacity=21845, protected_count=directory.data.live_count[0:1], fields=cartpole_schema, backing=backing)\ng1        = fields.allocate(capacity=1365,  protected_count=directory.data.live_count[1:2], fields=g1_schema,       backing=backing)", apply: () => {} },
       { lane: "Newton", tag: "graph", call: "build_reset_commands kernel", text: "Two causes, one batch. World 3's episode ended and the curriculum wants a G1 in its place: REPLACE, same identity at the next generation, destination prototype G1, so handle (3, 1) stops resolving. The loop also raised the cartpole target from 6 to 7: CREATE. Newton's own kernel writes both. Nothing in the package has run yet.",
         table: { title: "commands, after the kernel · sequence 42 · count 2", head: ["request", "operation", "instance_id", "generation", "prototype"], rows: [["0", "REPLACE", "3", "1", "1 = G1"], ["1", "CREATE", "-", "-", "0 = cartpole"]] },
-        notes: [["ending an episode", "forces nothing. Newton picks: restart in place, no request; REPLACE, a new world under the same identity, here in another prototype; or DESTROY, if the population is shrinking"], ["same-prototype REPLACE", "would be restart in place plus a retired handle; nothing in memory or the counts would move"], ["sequence 42", "one higher than the last batch; replaying the same number returns the previous outcome"]],
+        notes: [["ending an episode", "forces nothing. Newton picks: restart in place, no request; REPLACE, a new world under the same identity, here in another prototype; or DESTROY, if the population is shrinking"], ["same-prototype REPLACE", "is not free either: the identity gets a fresh slot and the old slot becomes a hole that compaction closes. Only a restart in place, with no request, moves nothing"], ["sequence 42", "one higher than the last batch; replaying the same number returns the previous outcome"]],
         values: "@wp.kernel\ndef build_reset_commands(done, handle_id, handle_gen, next_prototype, c: InstanceCommands):\n    w = wp.tid()\n    if done[w]:\n        i = wp.atomic_add(c.count, 0, 1)      # claim request i\n        c.operation[i]   = REPLACE\n        c.instance_id[i] = handle_id[w]\n        c.generation[i]  = handle_gen[w]\n        c.prototype[i]   = next_prototype[w]  # the curriculum's choice for this slot", apply: (S) => { S.commands = 2; } },
       { lane: "Newton", tag: "host", call: "if live + creates > ready: map more pages first", text: "Is there room? 7 cartpoles against 5,461 ready slots and 3 G1s against 256, so no page work this reset. Had either answer been no, these host calls would run first, between replays.",
-        notes: [["6,826", "the current 5,461 ready cartpole rows plus one more page of 1,365"], ["(6826, 256)", "the new admissible prefix per prototype"]],
+        notes: [["6,826", "the current 5,461 ready cartpole rows plus one more page of 1,365"], ["(6826, 256)", "one admissible prefix per prototype, in slot_limits order. G1 is restated at its current 256; the call only raises prefixes, so that changes nothing"]],
         values: "# only when room is short; not this time\nfields.map_backing(cart, rows=6826)\nfields.publish_ready(cart, rows=6826)\ndirectory.publish_admissible_slots(directory, (6826, 256))", apply: () => {} },
       { lane: "directory", tag: "graph", call: "directory.begin(directory, commands)", text: "Reads the two requests. Checks that handle (3, 1) names a live world at its current generation and that sequence 42 is higher than the last one. The batch moves to VALIDATED.",
         table: { title: "directory.transaction, after begin · phase VALIDATED", head: ["request", "status"], rows: [["0", "OK: (3, 1) is live and current"], ["1", "OK"]] },
@@ -905,7 +919,7 @@
         notes: [["nworld", "a CountParameter in each MJWarp Data, bound at capture time to that prototype's live count"], ["updater node", "the first node of the graph; it reads the counts and resizes the kernel nodes before they run"]],
         values: "# recorded once at startup:\nwp.launch(cartpole_step, dim=d_cart.nworld, ...)   # d_cart.nworld → directory.data.live_count[0]\nwp.launch(g1_step,       dim=d_g1.nworld,   ...)   # d_g1.nworld   → directory.data.live_count[1]\n# every step:\ncudaGraphLaunch(step)   # updater reads [6, 3]; cartpole_step runs 6 worlds, g1_step 3", apply: (S) => { S.nodes = [6, 3]; } },
       { lane: "backing", tag: "none", call: "", text: "Backing did not move this reset: the cartpole range keeps 4 pages mapped, the G1 range 3, 9 handles stay in the pool, 16 is the budget. It changes only when a prototype outgrows its ready prefix or the mix shifts far enough to need pages.",
-        notes: [["mapped", "cartpole 4 pages, 8 MiB; G1 3 pages, 6 MiB"], ["pool", "9 handles created at startup, unmapped, counted"], ["budget", "16 handles, 32 MiB"]],
+        notes: [["mapped", "cartpole 4 pages, 8 MiB; G1 3 pages, 6 MiB"], ["pool", "9 retained handles, unmapped, counted"], ["budget", "16 handles, 32 MiB"]],
         values: "backing.memory_report(backing)", apply: () => {} },
     ];
     const S = { step: 0 };
@@ -942,7 +956,181 @@
     render();
   }
 
-  const widgets = { population, lifecycle, replay, backing, memory, distribution, stack, compare, walkthrough };
+  /* ------------------------------------------------------------------ */
+  /* 10. Quantities: seven markers on one axis, one call moves one       */
+  /* ------------------------------------------------------------------ */
+  function quantities(root) {
+    const n = (v) => v.toLocaleString();
+    const base = () => ({ execution: 6, protected: 6, live: 6, admissible: 5461, ready: 5461, mapped: 5461, pages: 4, reserved: 21845 });
+    const G1Q = { execution: 2, protected: 2, live: 2, admissible: 256, ready: 256, mapped: 256, pages: 3, reserved: 1365 };
+    const STEPS = [
+      { tag: "none", who: "", call: "Start", text: "The cartpole storage as the walkthrough left it: 6 live worlds, 4 pages mapped, 5,461 slots ready and admissible, 21,845 slots reserved. Several markers coincide, which is normal; they are still different numbers owned by different modules.", moves: [], apply: () => {} },
+      { tag: "host", who: "fields", call: "fields.map_backing(cart, rows=6826)", text: "One more page under the range. Rows 5,461 to 6,825 now have bytes behind them. Nothing may touch them yet: no kernel is bound that far and the directory may not place there.", moves: ["mapped"], apply: (q) => { q.mapped = 6826; q.pages = 5; } },
+      { tag: "host", who: "fields", call: "fields.publish_ready(cart, rows=6826)", text: "An ordered device write. Memory operations may use the accessible prefix [0, 6,826), if their own count and initialization allow it. Shrink must order old readers before retirement. The directory still may not place there.", moves: ["ready"], apply: (q) => { q.ready = 6826; } },
+      { tag: "host", who: "directory", call: "directory.publish_admissible_slots(directory, (6826, 256))", text: "The directory may now hand out cartpole slots up to 6,825. Only now can a create land in the new rows. The tuple has one entry per prototype in slot_limits order, so G1 is restated at its current 256; the call only raises prefixes, so restating a value changes nothing.", moves: ["admissible"], apply: (q) => { q.admissible = 6826; } },
+      { tag: "graph", who: "directory", call: "a batch with CREATE × 1,000 → directory.publish", text: "Live rises to 1,006. The protected count is the same device scalar seen through the storage, so it rises with it. The execution count does not: it is what the last replay read.", moves: ["live", "protected"], apply: (q) => { q.live = 1006; q.protected = 1006; } },
+      { tag: "graph", who: "graph", call: "cudaGraphLaunch(step)", text: "The updater node reads the count and the cartpole kernel runs 1,006 worlds. Execution has caught up with live.", moves: ["execution"], apply: (q) => { q.execution = 1006; } },
+      { tag: "host", who: "directory, fields", call: "status = directory.withdraw_admissible_slots_async(directory, (5461, 256)); fields.withdraw_backing(retirement, 5461, streams=readers, prerequisite=status)", text: "Shrinking runs the markers in reverse, in two phases. First the withdrawal: admissible drops so no new create lands in the tail, then ready drops as an ordered device write after the current stream has waited on every reader, and a completion event is recorded. Pages stay mapped. Nothing on the CPU blocks. Live is 1,006, so the device-side check passes.", moves: ["admissible", "ready"], apply: (q) => { q.admissible = 5461; q.ready = 5461; } },
+      { tag: "host", who: "fields", call: "fields.reclaim_backing(retirement)   # poll; False while readers are pending", text: "The second phase. Reclaim polls the completion event; once it has passed, no kernel can still be reading the tail, and the page is unmapped into the pool. Until then the call returns pending and the loop keeps running. Cancellation would keep the pages and the smaller ready count; a later publish_ready can restore accessible capacity.", moves: ["mapped"], apply: (q) => { q.mapped = 5461; q.pages = 4; } },
+    ];
+    const NAMES = ["execution", "protected", "live", "admissible", "ready", "mapped", "reserved"];
+    const OWNER = { execution: "graph", protected: "storage (borrowed)", live: "directory", admissible: "directory", ready: "fields", mapped: "backing", reserved: "backing" };
+    const SEG = (lo, hi, q) => {
+      if (hi === "live" || hi === "protected" || hi === "execution") return "live worlds";
+      if (hi === "admissible") return "free slots the directory may hand out";
+      if (hi === "ready") return "ready, not yet admissible";
+      if (hi === "mapped") return "mapped, not yet published";
+      return "reserved addresses, no pages";
+    };
+    const S = { step: 0 };
+    const stateAt = (k) => { const q = base(); for (let i = 1; i <= k; i++) STEPS[i].apply(q); return q; };
+    const SHORT = ["Start", "map_backing", "publish_ready", "publish_admissible_slots", "CREATE × 1,000", "replay", "withdraw", "reclaim"];
+    const right = el("div", { class: "gc-wt-state" });
+    const items = STEPS.map((st, i) => button(`${i + 1}. ${SHORT[i]}`, () => { S.step = i; render(); }));
+    const callLine = el("div", { class: "gc-wt-values gc-q-call" });
+    function render() {
+      const k = S.step, q = stateAt(k), moved = STEPS[k].moves;
+      items.forEach((b, i) => b.classList.toggle("gc-btn-primary", i === k));
+      right.innerHTML = "";
+      callLine.textContent = STEPS[k].call; if (k) right.appendChild(callLine);
+      const d = el("div", { class: "gc-wt-desc" }); d.appendChild(el("span", { class: `gc-tag gc-tag-${STEPS[k].tag}`, text: STEPS[k].tag === "none" ? "state" : STEPS[k].tag })); d.appendChild(document.createTextNode(" " + STEPS[k].text)); right.appendChild(d);
+      const W = 760, x0 = 30, x1 = W - 30;
+      const sv = svg("svg", { viewBox: `0 0 ${W} 300`, width: "100%" });
+      const ruler = (q, yTop, title, hot) => {
+        const vals = [...new Set([0, ...NAMES.map((m) => q[m])])].sort((a, b) => a - b);
+        const xs = vals.map((v, i) => x0 + (i * (x1 - x0)) / (vals.length - 1));
+        sv.appendChild(svg("text", { x: x0, y: yTop, "font-size": 11, "font-weight": "600", fill: C.text, text: title }));
+        for (let i = 0; i < vals.length - 1; i++) {
+          const hiNames = NAMES.filter((m) => q[m] === vals[i + 1]);
+          const fill = hiNames.includes("live") || hiNames.includes("protected") || hiNames.includes("execution") ? "#2563eb" : hiNames.includes("admissible") ? "#e5e7eb" : hiNames.includes("ready") ? "#bfdbfe" : hiNames.includes("mapped") ? "#93c5fd" : "none";
+          sv.appendChild(svg("rect", { x: xs[i], y: yTop + 42, width: xs[i + 1] - xs[i], height: 24, fill, stroke: "#9ca3af", "stroke-dasharray": fill === "none" ? "4 3" : "" }));
+          sv.appendChild(svg("text", { x: (xs[i] + xs[i + 1]) / 2, y: yTop + 80, "text-anchor": "middle", "font-size": 9, fill: C.muted, text: SEG(vals[i], hiNames[0], q) }));
+        }
+        vals.forEach((v, i) => {
+          const names = i === 0 ? [] : NAMES.filter((m) => q[m] === v), isHot = hot && names.some((m) => moved.includes(m));
+          sv.appendChild(svg("line", { x1: xs[i], y1: yTop + 36, x2: xs[i], y2: yTop + 70, stroke: isHot ? C.bad : "#111827", "stroke-width": isHot ? 2.5 : 1.2 }));
+          sv.appendChild(svg("text", { x: xs[i], y: yTop + 30, "text-anchor": "middle", "font-size": 10.5, "font-weight": "600", fill: isHot ? C.bad : C.text, text: n(v) }));
+          names.forEach((m, j) => sv.appendChild(svg("text", { x: xs[i], y: yTop + 96 + j * 11, "text-anchor": "middle", "font-size": 9, fill: hot && moved.includes(m) ? C.bad : C.muted, "font-weight": hot && moved.includes(m) ? "600" : "400", text: m })));
+        });
+      };
+      ruler(q, 14, "cartpole storage · slot index →  (spaced by rank, not to scale)", true);
+      ruler(G1Q, 160, "G1 storage · unchanged by every step here: the storage calls name one storage; only the directory call names both", false);
+      right.appendChild(sv);
+      const tbl = el("div", { class: "gc-wt-table" });
+      const head = el("div", { class: "gc-wt-row gc-wt-head gc-wt-auto" }); ["quantity", "cartpole", "G1", "owned by", "moved by"].forEach((h) => head.appendChild(el("div", { text: h }))); tbl.appendChild(head);
+      const MOVED = { execution: "the updater node at each replay", protected: "whoever writes the borrowed scalar: the directory", live: "publish, publish_compaction", admissible: "publish_admissible_slots, withdraw_admissible_slots", ready: "publish_ready, withdraw_backing, resize_backing", mapped: "map_backing, reclaim_backing, resize_backing", reserved: "allocate, once" };
+      NAMES.forEach((m) => { const r = el("div", { class: "gc-wt-row gc-wt-auto" + (moved.includes(m) ? " gc-wt-hl" : "") }); [m, m === "mapped" ? `${n(q[m])} rows = ${q.pages} pages` : n(q[m]), m === "mapped" ? `${n(G1Q[m])} rows = ${G1Q.pages} pages` : n(G1Q[m]), OWNER[m], MOVED[m]].forEach((v) => r.appendChild(el("div", { text: v }))); tbl.appendChild(r); });
+      right.appendChild(tbl);
+    }
+    root.appendChild(el("div", { class: "gc-toolbar gc-steptabs" }, items));
+    root.appendChild(right);
+    root.appendChild(el("div", { class: "gc-hint", text: "Click a step. Each call moves the markers in red and no others. In this example protected equals live. Execution is a snapshot taken before dependent kernels, not a permanent bound on later live counts. Readiness does not initialize data. Deferred withdrawal changes usable prefixes; reclaim later changes mapping without an explicit CPU reader wait." }));
+    render();
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* 11. Handles: forward and inverse tables, lookups that can go stale  */
+  /* ------------------------------------------------------------------ */
+  function handles(root) {
+    const PROTO = ["cartpole", "G1"], CAP = [8, 4];
+    const base = () => ({ ids: [0, 1, 2, 3, 4, 5, 6, 7].map((id) => ({ id, gen: 1, proto: id < 6 ? 0 : 1, slot: id < 6 ? id : id - 6, live: true })), nextId: 8, retired: [] });
+    let D = base();
+    const inverse = () => PROTO.map((p, k) => { const row = Array(CAP[k]).fill(-1); D.ids.forEach((w) => { if (w.live && w.proto === k) row[w.slot] = w.id; }); return row; });
+    const note = el("div", { class: "gc-note" }); const say = (m, bad) => { note.innerHTML = ""; if (Array.isArray(m)) note.appendChild(el("pre", { class: "gc-hd-result", text: m.join("\n") })); else note.textContent = m; note.classList.toggle("gc-note-bad", !!bad); };
+    const idIn = el("input", { type: "number", min: 0, max: 20, value: 3, class: "gc-num" }), genIn = el("input", { type: "number", min: 1, max: 9, value: 1, class: "gc-num" });
+    const protoSel = el("select", { class: "gc-num" }); PROTO.forEach((p, k) => protoSel.appendChild(el("option", { value: String(k), text: p })));
+    const slotIn = el("input", { type: "number", min: 0, max: 7, value: 3, class: "gc-num" });
+    const figure = el("div", { class: "gc-hd" });
+    let hl = { id: null, cell: null, result: null };
+    function location() {
+      const id = +idIn.value, gen = +genIn.value, w = D.ids.find((x) => x.id === id);
+      hl = { id, cell: null, result: null };
+      const head = `location(data, identity=${id}, generation=${gen})`;
+      if (!w) { hl.result = "invalid"; say([head, `  forward   prototype[${id}] = -1                 identity never published`, `→ (prototype=-1, slot=-1, valid=False)`], true); render(); return; }
+      if (w.gen !== gen) { hl.result = "invalid"; say([head, `  forward   generation[${id}] = ${w.gen}  ≠  ${gen}        stale handle: ${w.live ? "an earlier lifetime of this identity" : "the identity is retired"}`, `→ (prototype=-1, slot=-1, valid=False)`], true); render(); return; }
+      if (!w.live) { hl.result = "invalid"; say([head, `  forward   prototype[${id}] = -1                 identity is dead`, `→ (prototype=-1, slot=-1, valid=False)`], true); render(); return; }
+      const inv = inverse()[w.proto][w.slot]; hl.cell = [w.proto, w.slot];
+      if (inv !== id) { hl.result = "invalid"; say([head, `  inverse   slot_id[${PROTO[w.proto]}, ${w.slot}] = ${inv}  ≠  ${id}   tables disagree`, `→ (prototype=-1, slot=-1, valid=False)`], true); render(); return; }
+      hl.result = "valid";
+      say([head, `  forward   prototype[${id}] = ${w.proto} (${PROTO[w.proto]}), slot[${id}] = ${w.slot}, generation[${id}] = ${gen}  ✓`, `  inverse   slot_id[${PROTO[w.proto]}, ${w.slot}] = ${id}  ✓`, `→ (prototype=${w.proto}, slot=${w.slot}, valid=True)`]); render();
+    }
+    function handleAt() {
+      const k = +protoSel.value, slot = +slotIn.value, inv = inverse()[k][slot];
+      hl = { id: inv >= 0 ? inv : null, cell: [k, slot], result: null };
+      const head = `handle_at(data, prototype=${k} (${PROTO[k]}), slot=${slot})`;
+      if (!Number.isInteger(slot) || slot < 0 || slot >= CAP[k] || inv == null || inv < 0) say([head, `  inverse   slot_id[${PROTO[k]}, ${slot}] = -1                unoccupied`, `→ (identity=-1, generation=0, valid=False)`], true);
+      else { const w = D.ids.find((x) => x.id === inv); say([head, `  inverse   slot_id[${PROTO[k]}, ${slot}] = ${inv}`, `  forward   slot[${inv}] = ${w.slot}  ✓   generation[${inv}] = ${w.gen}`, `→ (identity=${inv}, generation=${w.gen}, valid=True)`]); }
+      render();
+    }
+    const dId = el("input", { type: "number", min: 0, max: 20, value: 2, class: "gc-num" }), rId = el("input", { type: "number", min: 0, max: 20, value: 3, class: "gc-num" }), rProto = el("select", { class: "gc-num" }); PROTO.forEach((p, k) => rProto.appendChild(el("option", { value: String(k), text: p })));
+    function destroy() { const id = +dId.value, w = D.ids.find((x) => x.id === id && x.live); if (!w) { say(`DESTROY (${id}, ·) rejected: identity ${id} is not live.`, true); return; } const g = w.gen; w.live = false; w.gen += 1; D.retired.push(id); hl = { id }; say(`DESTROY (${id}, ${g}), published. Identity ${id} is dead and its generation advanced to ${w.gen}, so (${id}, ${g}) can never match again. ${PROTO[w.proto]} slot ${w.slot} is a hole; the dense-prefix certificate is cleared.`); render(); }
+    function replaceW() { const id = +rId.value, k = +rProto.value, w = D.ids.find((x) => x.id === id && x.live); if (!w) { say(`REPLACE (${id}, ·) rejected: identity ${id} is not live.`, true); return; } const inv = inverse(); const oldSlot = w.slot, oldProto = w.proto; const slot = inv[k].indexOf(-1); if (slot < 0) { say(`REPLACE rejected: NO_SLOTS in ${PROTO[k]} among the ${CAP[k]} drawn.`, true); return; } const g = w.gen; w.gen += 1; w.proto = k; w.slot = slot; hl = { id }; say(`REPLACE (${id}, ${g}) → ${PROTO[k]}, published. Same identity at generation ${w.gen}, now in ${PROTO[k]} slot ${slot}; handle (${id}, ${g}) is stale. ${PROTO[oldProto]} slot ${oldSlot} is a hole: a REPLACE always draws a fresh slot, even within the same prototype.`); render(); }
+    function create() {
+      const k = 0, row = inverse()[0], slot = row.indexOf(-1); if (slot < 0) { say("No free cartpole slot in the 8 drawn.", true); return; }
+      // the directory recycles dead identities: after each publish every dead identity below the terminal generation is back in the free list
+      const dead = D.ids.filter((x) => !x.live).sort((a, b) => a.id - b.id)[0];
+      if (dead) { const old = dead.gen; dead.live = true; dead.proto = 0; dead.slot = slot; dead.gen += 1; hl = { id: dead.id }; say(`CREATE cartpole, published: identity ${dead.id} reused. It died at generation ${old}; publish incremented again, so the new world's handle is (${dead.id}, ${dead.gen}) in slot ${slot}. Every earlier (${dead.id}, …) is stale. Dead identities return to the free list after the batch that killed them; which one a CREATE draws is unspecified.`); }
+      else { const id = D.nextId++; D.ids.push({ id, gen: 1, proto: 0, slot, live: true }); hl = { id }; say(`CREATE cartpole, published: no dead identity to reuse, so a never-used identity ${id} at generation 1 in slot ${slot}.`); }
+      render();
+    }
+    function compact() { PROTO.forEach((p, k) => { const live = D.ids.filter((w) => w.live && w.proto === k), occupied = new Set(live.map((w) => w.slot)), tail = live.filter((w) => w.slot >= live.length); for (let slot = 0; slot < live.length; slot++) if (!occupied.has(slot)) tail.pop().slot = slot; }); hl = {}; say("Compaction published. Live worlds moved into the lowest slots of each prototype. Every identity and generation is unchanged: the handles you hold still resolve, now to new slots."); render(); }
+    function render() {
+      figure.innerHTML = "";
+      const fwd = el("div", { class: "gc-hd-panel" }); fwd.appendChild(el("div", { class: "gc-wt-panel-name", text: "forward: prototype[id], slot[id], generation[id]  (one row per identity)" }));
+      const t = el("div", { class: "gc-wt-table" }); const h = el("div", { class: "gc-wt-row gc-wt-head gc-wt-auto" }); ["identity", "generation", "prototype", "slot", ""].forEach((x) => h.appendChild(el("div", { text: x }))); t.appendChild(h);
+      D.ids.forEach((w) => { const r = el("div", { class: "gc-wt-row gc-wt-auto" + (hl.id === w.id ? " gc-wt-hl" : "") + (w.live ? "" : " gc-hd-dead") }); [String(w.id), String(w.gen), w.live ? PROTO[w.proto] : "-1", w.live ? String(w.slot) : "-1", w.live ? "" : "dead, identity retired"].forEach((x) => r.appendChild(el("div", { text: x }))); t.appendChild(r); });
+      fwd.appendChild(t); figure.appendChild(fwd);
+      const inv = el("div", { class: "gc-hd-panel" }); inv.appendChild(el("div", { class: "gc-wt-panel-name", text: "inverse: slot_id[slot_starts[prototype] + slot]  (one cell per slot; identity only, the generation always comes from the forward table)" }));
+      inverse().forEach((row, k) => { const line = el("div", { class: "gc-wt-strip" }); line.appendChild(el("span", { class: "gc-label", text: PROTO[k] })); row.forEach((id, slot) => { const c = el("div", { class: "gc-hd-cell" + (id >= 0 ? " gc-hd-occ" : "") + (hl.cell && hl.cell[0] === k && hl.cell[1] === slot ? " gc-wt-hl" : ""), text: `slot ${slot}\n${id >= 0 ? "id " + id : "free"}` }); line.appendChild(c); }); inv.appendChild(line); });
+      figure.appendChild(inv);
+    }
+    root.appendChild(el("div", { class: "gc-toolbar" }, [el("span", { class: "gc-label", text: "handle → location:  location(data, identity" }), idIn, el("span", { class: "gc-label", text: ", generation" }), genIn, el("span", { class: "gc-label", text: ")" }), button("look up", location, true)]));
+    root.appendChild(el("div", { class: "gc-toolbar" }, [el("span", { class: "gc-label", text: "location → handle:  handle_at(data, prototype" }), protoSel, el("span", { class: "gc-label", text: ", slot" }), slotIn, el("span", { class: "gc-label", text: ")" }), button("look up", handleAt, true)]));
+    root.appendChild(el("div", { class: "gc-toolbar" }, [el("span", { class: "gc-label", text: "change the world set:" }), button("Destroy", destroy), el("span", { class: "gc-label", text: "identity" }), dId, el("span", { class: "gc-label", text: "  ·  " }), button("Replace", replaceW), el("span", { class: "gc-label", text: "identity" }), rId, el("span", { class: "gc-label", text: "with a" }), rProto, el("span", { class: "gc-label", text: "  ·  " }), button("Create a cartpole", create), button("Compact", compact), button("Start over (figure only)", () => { D = base(); hl = {}; say("Six cartpoles and two G1s, all at generation 1."); render(); })]));
+    root.appendChild(figure); root.appendChild(note);
+    root.appendChild(el("div", { class: "gc-hint", text: "Try: look up (3, 1), replace identity 3 with a G1, then look up (3, 1) again and (3, 2). Then destroy identity 2, look up (4, 1), compact, and look up (4, 1) again: same handle, new slot. Replacing 4 with a cartpole shows that even a same-prototype REPLACE moves to a fresh slot." }));
+    say("Six cartpoles and two G1s, all at generation 1. Look up a handle, or change the world set and look again."); render();
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* 12. Ladder: from the naive version to this design, one overhead     */
+  /*     at a time, with the CPU and GPU timeline of one reset + step    */
+  /* ------------------------------------------------------------------ */
+  function ladder(root) {
+    const stages = [
+      { name: "1. Fixed addresses", change: "Reserve a virtual range once. Map physical memory beneath it as needed.", stays: "The reservation and captured pointers stay fixed. Access is valid only where backing and permission are ready.", cost: "Reservation capacity is finite. Directory metadata and capacity scans still cost memory and time." },
+      { name: "2. GPU placement", change: "A command batch creates, replaces or destroys worlds. Compaction updates their locations after copying continuing state.", stays: "A continuing world's handle survives compaction. Replacement publishes a new generation.", cost: "Initialization, copies and directory kernels remain real GPU work." },
+      { name: "3. GPU work counts", change: "The updater reads device counts before the dependent kernels and adjusts their work sizes.", stays: "The prepared graph can replay with different populations inside its declared limits.", cost: "Updater and conditional-control work remain. A changed topology or unsupported branch needs preparation." },
+      { name: "4. Fresh mapping", change: "Map addresses beyond the historical mapping frontier without an explicit CPU reader join, then publish readiness in stream order.", stays: "Existing readers stay inside the old ready prefix. New rows are not readable until mapped, accessible and initialized as required.", cost: "Host map and access calls still take time. Historical address reuse requires maintenance; a full budget can delay growth." },
+      { name: "5. Reuse backing", change: "Keep unmapped handles in the shared pool. A later map takes a compatible handle from that pool first.", stays: "Mapped and pooled handles both count against the budget.", cost: "A cold pool still requires physical allocation. Warm backing removes that allocation, not mapping or permission work. Driver failures remain possible." },
+      { name: "6. Deferred retirement", change: "Withdraw the tail in stream order, keep its pages mapped while old readers finish, then poll and reclaim.", stays: "Future work must obey the smaller prefix. All earlier readers must be included. Surviving-prefix work may continue.", cost: "The CPU no longer waits explicitly for those readers. Unmap still runs on the host, and receivers need the donor's pages before reuse. Joined resize is still available." },
+    ];
+    let selected = 5;
+    const body = el("div", { class: "gc-wt-state" });
+    const buttons = stages.map((stage, i) => button(stage.name, () => { selected = i; render(); }));
+    function render() {
+      buttons.forEach((b, i) => b.classList.toggle("gc-btn-primary", selected === i));
+      const stage = stages[selected]; body.innerHTML = "";
+      body.appendChild(el("div", { class: "gc-ld-name", text: stage.name }));
+      const grid = el("div", { class: "gc-ld-grid" });
+      [["Change", stage.change], ["Still required", stage.stays], ["Remaining cost", stage.cost]].forEach(([label, text]) => {
+        grid.appendChild(el("div", { class: "gc-ld-term", text: label }));
+        grid.appendChild(el("div", { text }));
+      });
+      body.appendChild(grid);
+      if (selected === 5) {
+        const flow = el("div", { class: "gc-toolbar", "aria-label": "Deferred retirement sequence" });
+        ["Withdraw admission + ready", "→ keep pages mapped", "→ poll reader events", "→ CPU unmap", "→ shared pool"].forEach((text) => flow.appendChild(el("span", { class: "gc-chip", text })));
+        body.appendChild(flow);
+      }
+    }
+    root.appendChild(el("div", { class: "gc-toolbar gc-steptabs" }, buttons));
+    root.appendChild(body);
+    root.appendChild(el("div", { class: "gc-hint", text: "These are available mechanisms, not measured speedups or a promise of zero GPU idle time. The application chooses when to grow, retain spare capacity, use joined resize, or defer retirement." }));
+    render();
+  }
+
+  const widgets = { population, lifecycle, replay, backing, memory, distribution, stack, compare, walkthrough, quantities, handles, ladder };
   function init() {
     document.querySelectorAll(".gc-widget").forEach((root) => {
       if (root.dataset.ready && root.childElementCount > 0) return;

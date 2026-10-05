@@ -1,7 +1,7 @@
 ---
 id: structure
 title: Four parts
-sidebar_position: 4
+sidebar_position: 5
 ---
 
 # Four parts
