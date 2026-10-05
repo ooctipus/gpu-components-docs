@@ -14,17 +14,17 @@
 .explainer button, .explainer select, .explainer input { font: inherit; }
 .explainer button, .explainer select { cursor: pointer; }
 .explainer button:focus-visible, .explainer select:focus-visible, .explainer input:focus-visible, .explainer [tabindex]:focus-visible { outline: 2px solid var(--gpu); outline-offset: 3px; }
-.settings { display: flex; align-items: center; flex-wrap: wrap; gap: 12px 24px; margin-bottom: 20px; }
+.settings { display: flex; align-items: center; flex-wrap: wrap; gap: 12px 24px; margin-bottom: 12px; }
 .settings label { display: flex; gap: 9px; align-items: center; font-size: 0.85rem; color: var(--muted); }
 .settings select { color: var(--ink); background: var(--surface); border: 1px solid var(--rule); padding: 7px 26px 7px 9px; border-radius: 6px; max-width: 100%; }
-.stages { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); border-bottom: 1px solid var(--rule); gap: 4px; }
-.stages button { display: flex; align-items: center; flex-direction: column; gap: 7px; border: 0; border-bottom: 3px solid transparent; background: none; color: var(--muted); padding: 7px 2px 12px; font-size: 0.78rem; }
+.stages { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); border-bottom: 1px solid var(--rule); gap: 4px; position: sticky; top: var(--ifm-navbar-height); z-index: 10; background: var(--surface); }
+.stages button { display: flex; align-items: center; justify-content: center; gap: 7px; border: 0; border-bottom: 3px solid transparent; background: none; color: var(--muted); padding: 8px 2px; font-size: 0.78rem; }
 .stages button:hover { color: var(--ink); background: color-mix(in srgb, var(--gpu) 5%, transparent); }
 .stages button[aria-pressed='true'] { color: var(--gpu); border-bottom-color: var(--gpu); }
-.stageNumber { display: grid; place-items: center; width: 26px; height: 26px; border-radius: 50%; font-weight: 600; background: var(--ifm-color-emphasis-100); }
+.stageNumber { display: grid; place-items: center; width: 24px; height: 24px; flex-shrink: 0; border-radius: 50%; font-weight: 600; background: var(--ifm-color-emphasis-100); }
 .stages button[data-enabled='true'] .stageNumber { background: color-mix(in srgb, var(--gpu) 12%, var(--surface)); color: var(--gpu); }
 .stages button[aria-pressed='true'] .stageNumber { background: var(--gpu); color: var(--surface); }
-.stageStory { display: grid; grid-template-columns: minmax(190px, 0.85fr) 1.8fr; gap: 24px; align-items: start; padding: 24px 0 22px; min-height: 150px; }
+.stageStory { display: grid; grid-template-columns: minmax(190px, 0.85fr) 1.8fr; gap: 24px; align-items: start; padding: 14px 0; }
 .eyebrow { font-size: 0.73rem; color: var(--muted); }
 .stageStory h2 { font-size: 1.35rem; line-height: 1.22; margin: 6px 0 0; letter-spacing: -0.025em; }
 .stageStory p { font-size: 0.92rem; line-height: 1.55; margin: 0; }
@@ -32,9 +32,9 @@
 .policyNote { display: block; margin-top: 9px; color: var(--control); font-size: 0.76rem; }
 .sectionHeading { display: flex; justify-content: space-between; flex-wrap: wrap; align-items: baseline; gap: 5px 16px; font-size: 0.85rem; margin-bottom: 12px; }
 .sectionHeading span { font-size: 0.73rem; color: var(--muted); }
-.graphSection { padding: 16px 0 8px; border-top: 1px solid var(--rule); }
+.graphSection { padding: 10px 0 6px; border-top: 1px solid var(--rule); }
 .diagramScroll, .timelineScroll { overflow-x: auto; overscroll-behavior-x: contain; scrollbar-width: thin; }
-.graph { display: block; width: 100%; min-width: 650px; }
+.graph { display: block; width: 100%; max-width: 790px; min-width: 650px; margin: 0 auto; }
 .graphBoundary { fill: color-mix(in srgb, var(--gpu) 3%, var(--surface)); stroke: color-mix(in srgb, var(--gpu) 45%, var(--rule)); stroke-width: 1; }
 .graphCaption { fill: var(--gpu); font-size: 10px; letter-spacing: 1px; font-weight: 600; }
 .graphWire { fill: none; stroke: color-mix(in srgb, var(--gpu) 40%, var(--rule)); stroke-width: 1.5; }
@@ -54,14 +54,14 @@
 .joinNode { fill: var(--gpu); }
 .sceneDrawing { display: block; height: 100%; width: 100%; color: var(--gpu); }
 .banana { fill: color-mix(in srgb, var(--driver) 15%, transparent); stroke: var(--driver); }
-.graphNote { color: var(--muted); font-size: 0.78rem; margin: 10px 0 0; }
-.playback { display: flex; align-items: center; gap: 8px; padding-top: 23px; }
+.graphNote { color: var(--muted); font-size: 0.78rem; margin: 6px 0 0; }
+.playback { display: flex; align-items: center; gap: 8px; padding-top: 8px; }
 .playback button { min-height: 37px; border-radius: 6px; padding: 6px 11px; white-space: nowrap; font-size: 0.82rem; }
 .playButton { background: var(--gpu); color: var(--surface); border: 1px solid var(--gpu); min-width: 96px; }
 .quietButton { border: 1px solid var(--rule); background: var(--surface); color: var(--ink); }
 .scrubber { display: flex; flex: 1; margin: 0 0 0 12px; min-width: 90px; }
 .scrubber input { width: 100%; accent-color: var(--gpu); cursor: ew-resize; }
-.resetStory { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 18px 0 14px; font-size: 0.88rem; }
+.resetStory { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 10px 0 8px; font-size: 0.88rem; }
 .resetBadge { color: var(--control); font-size: 0.66rem; font-weight: 650; letter-spacing: 0.1em; padding: 4px 6px; background: color-mix(in srgb, var(--control) 9%, transparent); border-radius: 3px; }
 .flowArrow { color: var(--muted); padding: 0 3px; }
 .episodeState { color: var(--muted); margin-left: auto; font-size: 0.75rem; }

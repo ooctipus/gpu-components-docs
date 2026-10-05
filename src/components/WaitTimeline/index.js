@@ -51,13 +51,13 @@ function SceneDrawing({prototype, phase = 0, moving = false}) {
 
 function CapturedGraph({schedule, time, playing}) {
   const {scene, stage, events, milestones} = schedule;
-  const count = scene.prototypes.length, height = Math.max(150, count * 56 + 42), middle = height / 2;
+  const count = scene.prototypes.length, height = count * 48 + 36, middle = height / 2 + 9;
   const isGPUCount = stage >= 3, isGPUReset = stage >= 2;
   const resetActive = events.some(e => ['placement', 'initialize', 'publish-replacement', 'compact'].includes(e.id) && active(e, time));
   const countsActive = events.some(e => /gpu-counts|read-counts|set-sizes|check-ready/.test(e.id) && active(e, time));
   const donor = scene.prototypes.findIndex(p => p.role === 'donor'), receiver = scene.prototypes.findIndex(p => p.role === 'receiver');
   const newEpisode = time >= milestones.replace;
-  const badgeY = 33 + (newEpisode ? receiver : donor) * (height - 54) / count;
+  const badgeY = 30 + (newEpisode ? receiver : donor) * 48;
   return <div className={styles.graphSection}>
     <div className={styles.sectionHeading}>
       <strong>{isGPUCount ? 'One prepared graph' : stage === 0 ? 'Rebuild after addresses change' : 'Stable addresses; counts still come from the CPU'}</strong>
@@ -68,16 +68,16 @@ function CapturedGraph({schedule, time, playing}) {
         aria-label={isGPUCount ? 'One graph containing shared reset and count nodes, then independent prototype physics branches, then a join.' : 'CPU-managed reset or counts feed the prototype physics branches.'}>
         <rect className={styles.graphBoundary} x={isGPUCount ? 2 : 304} y="2" width={isGPUCount ? 786 : 484} height={height - 4} rx="12" />
         <text x={isGPUCount ? 18 : 320} y="22" className={styles.graphCaption}>{isGPUCount ? 'CAPTURE ONCE · REPLAY' : 'GPU PHYSICS'}</text>
-        <path className={styles.graphWire} d={`M124 ${middle}H159M269 ${middle}H324M730 43V${height - 37}`} />
+        <path className={styles.graphWire} d={`M124 ${middle}H159M269 ${middle}H324M730 51V${height - 33}`} />
         <rect className={styles.controlNode} data-gpu={isGPUReset} data-active={resetActive} x="14" y={middle - 22} width="110" height="44" rx="6" />
         <text x="69" y={middle - 3} textAnchor="middle" className={styles.nodeText}>Reset + place</text>
         <text x="69" y={middle + 13} textAnchor="middle" className={styles.nodeMeta}>{isGPUReset ? 'GPU' : 'CPU plans'}</text>
         <rect className={styles.controlNode} data-gpu={isGPUCount} data-active={countsActive} x="159" y={middle - 22} width="110" height="44" rx="6" />
         <text x="214" y={middle - 3} textAnchor="middle" className={styles.nodeText}>Work counts</text>
         <text x="214" y={middle + 13} textAnchor="middle" className={styles.nodeMeta}>{isGPUCount ? 'GPU' : 'CPU readback'}</text>
-        <path className={styles.graphWire} d={`M324 43V${height - 37}`} />
+        <path className={styles.graphWire} d={`M324 51V${height - 33}`} />
         {scene.prototypes.map((p, k) => {
-          const y = 33 + k * (height - 54) / count;
+          const y = 30 + k * 48;
           const running = events.some(e => e.lane === k + 2 && active(e, time));
           const worlds = time >= milestones.replace ? p.after : p.before;
           return <g key={p.id}>
