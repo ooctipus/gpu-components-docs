@@ -51,20 +51,20 @@ GPU Components knows numeric identities, slots and counts. It does not choose re
 </TabItem>
 <TabItem value="calls" label="Module calls">
 
-**Inside GPU Components.** Each arrow means “calls functions in.”
+**Follow world 3 changing from cartpole to G1.** Each arrow means “calls functions in.” The labels show this example's data.
 
 ```mermaid
-flowchart LR
-    fields --> backing
-    fields --> graphmod["graph"]
-    directory --> graphmod
+flowchart TB
+    fields["fields<br/>G1 joint arrays"] --> backing["backing<br/>Pages for those arrays"]
+    fields --> graphmod["graph<br/>Keep replay buffers alive"]
+    directory["directory<br/>World 3 → G1 slot 2"] --> graphmod
 ```
 
-`fields` calls `backing` to manage the memory under its arrays.
+**If the G1 storage needs room:** Newton requests growth. `fields` calls `backing` to map pages for additional G1 rows, before those rows can be used.
 
-`fields` and `directory` call `graph` to keep recorded resources alive and invalidate failed recordings. Those arrows describe recording safety, not a simulation-step sequence.
+**When recording the reset and physics:** `fields` asks `graph` to retain the G1 arrays, such as `qpos` and `qvel`. `directory` asks it to retain the identity and slot buffers used to locate world 3. These buffers must stay alive while the recording uses them. Failed recordings are invalidated.
 
-**There is no call from `directory` to `fields` or `backing`.** A create request can claim an available slot or be rejected; it cannot allocate more memory. Newton coordinates the separate operations.
+**If no G1 slot is available:** `directory` rejects the replacement and world 3 remains a cartpole. It cannot call `backing` to acquire pages. Newton can make room and submit a new request batch.
 
 </TabItem>
 </Tabs>
