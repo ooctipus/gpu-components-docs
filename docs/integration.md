@@ -16,7 +16,7 @@ import styles from '@site/src/css/integration.module.css';
 
 We prepare each scene in advance. The rest of these docs use Cartpole and G1, or scenes built from bananas and Frankas. Each prepared scene is a *world prototype*. Worlds using the same prototype share a batch of physics arrays.
 
-This page follows one reset using those same examples, then shows the [physics code](#physics-code), [Newton's setup](#newton-setup) and [IsaacLab MDP code](#isaaclab-mdp). The scene diagrams explain the relationships; the code comes from the keyboard implementation at the [published commits below](#source-snapshot), updated October 5, 2026.
+This page follows one reset using those same examples, then shows the [physics code](#physics-code), [Newton's setup](#newton-setup) and [IsaacLab MDP code](#isaaclab-mdp). The scene diagrams explain the relationships; the code comes from the keyboard implementation at the [published commits below](#source-snapshot), updated October 6, 2026.
 
 **The full application diff is broader than the integration.** Reading and resetting worlds through their handles is part of the task integration. Keyboard generation, typing rewards and command-scheduling optimizations are application choices. They appear in the same IsaacLab branch, but another task does not need to copy them.
 
@@ -432,13 +432,15 @@ Memory changes happen outside graph replay. The array's virtual starting address
 
 ## IsaacLab: write the task terms {#isaaclab-mdp}
 
-The working task uses a robot and keyboards of different sizes. The replacement works like the scene changes above. IsaacLab still owns the MDP: actions, observations, rewards, terminations and resets. The task-local selection API connects those terms to the current physics arrays.
+The current task can reset into **one or two SO-101 arms and a keyboard with 6–108 keys**. There are 19 keyboard layouts, each prepared with both arm counts, for 38 world prototypes. Two layouts have 108 keys but different generated properties. Each world has one typing sequence and one reward; either present arm can press the next key.
+
+IsaacLab owns actions, observations, rewards, terminations and resets. The task-local selection API connects those terms to the current physics arrays. The agent model turns the world observations into one input per present arm. GPU Components does not decide which arm types or how the reward is computed.
 
 For another task, the essential change is to read and write the world currently owned by each environment, and to update that ownership after a reset. The selectors below are this task's implementation of that lookup. Its typing commands, rewards and robot controller remain task code.
 
 ### Choose the joints once
 
-The configuration selects the robot's six joint coordinates and velocities:
+The single-arm configuration selects the robot's six joint coordinates and velocities:
 
 ```python title="so101_env_cfg.py — selected terms"
 from newton import Model
@@ -457,6 +459,8 @@ abnormal_robot = DoneTerm(func=mdp.joint_vel_out_of_limit, params={"joints": ROB
 ```
 
 Path matching happens once, before the managers are constructed. `selection_paths.py` converts the paths into numeric joint indices for each prototype. Physics reads and writes use those indices; they do not search strings at every step.
+
+`SO101KeyboardMultiArmEnvCfg` expands the robot selectors to match `Robot` and `Robot_1`, with space for twelve joints. It uses `count_per_world=None` and a fixed policy width so the same terms also accept a world containing only one arm. Missing entries are marked inactive.
 
 ### Read observations and write actions {#observation-before-after}
 
@@ -491,7 +495,7 @@ def joint_pos(env, joints):
 
 **What changed:** the term receives a selection instead of finding an asset. Both return joint positions in the task's coordinate convention. The selection resolves each environment's current prototype and array row, so the term still works after reset or compaction. The configuration supplies `params={"joints": ROBOT_Q}`.
 
-[Earlier observation](https://github.com/ooctipus/IsaacLab/blob/2b8d48d010f8bbf2caedbde060b7b18e66dd5053/source/isaaclab/isaaclab/envs/mdp/observations.py) · [Current task observation](https://github.com/ooctipus/IsaacLab/blob/251ab1b86164a593ff1955c8d32bee3b67074971/source/isaaclab_tasks/isaaclab_tasks/contrib/keyboard/mdp/observations.py). Excerpts omit type annotations.
+[Earlier observation](https://github.com/ooctipus/IsaacLab/blob/2b8d48d010f8bbf2caedbde060b7b18e66dd5053/source/isaaclab/isaaclab/envs/mdp/observations.py) · [Current task observation](https://github.com/ooctipus/IsaacLab/blob/8fcc40d248b41bb1e648d53950b476da41361ac4/source/isaaclab_tasks/isaaclab_tasks/contrib/keyboard/mdp/observations.py). Excerpts omit type annotations.
 
 Joint velocities use the same selection pattern:
 
@@ -518,7 +522,7 @@ Here `world` is the task's environment index and `slot` is a selected joint. Nei
 <details>
 <summary>More MDP code: relative poses and joint-limit termination</summary>
 
-For a term that combines several fields, pass them directly to a Warp kernel. This key-position observation selects one robot root and the keys, then computes their relative positions:
+For a term that combines several fields, pass them directly to a Warp kernel. This single-arm key-position observation selects one robot root and the keys, then computes their relative positions. The multi-arm task instead returns key positions once per world and transforms them in the agent model, as shown below.
 
 ```python title="mdp/observations.py — key positions"
 def key_positions_b(env, keys, root):
@@ -551,6 +555,33 @@ Several joints can flag the same environment, so the write is atomic. The manage
 
 </details>
 
+### One world observation, one policy input per arm {#shared-arm-policy}
+
+The multi-arm observation manager returns the typing state, robot states and key positions once per world. It does not duplicate the keyboard and sequence for each robot:
+
+```python title="Observation shapes — N worlds, up to two arms"
+policy         # [N, P]         shared target and typed sequence encoding inputs
+robot_state    # [N, 2, 25]     root pose, six q, six qd, six previous actions
+robot_active   # [N, 2]         which arms exist
+key_positions  # [N, 108, 3]    key positions in the world frame
+key_active     # [N, 108]       which keys exist
+```
+
+The [shared agent model](https://github.com/ooctipus/IsaacLab/blob/8fcc40d248b41bb1e648d53950b476da41361ac4/source/isaaclab_tasks/isaaclab_tasks/contrib/keyboard/agents/models.py) gathers the present arms, builds their observations, and evaluates the same MLP for each. Every arm sees its own joint positions, velocities and previous actions; the other arm's root pose relative to its own root, joint positions, velocities and previous actions; and all active keys relative to its own root. Missing-arm features are zero, with a presence flag. Absolute root poses do not enter the MLP.
+
+```text
+Worlds                     Shared actor                  Returned actions
+A: one arm                 A/0                           A: [a0, zeros]
+B: two arms                B/0, B/1                       B: [a0, a1]
+C: one arm                 C/0                           C: [a0, zeros]
+
+3 world observations  →    4 arm inputs              →    3 world action records
+```
+
+If A resets with two arms, the actor batch grows from four to five inputs. The sequence encoder still runs once per world. The actor returns six actions per present arm, placed into twelve-wide world records. PPO keeps one transition and reward per world; the critic averages its active-arm values and the action log probability sums across active arms.
+
+Physics contains only the arms and keys belonging to each prototype. The task's tensor interface still has padded slots and masks. The changing physics population and the changing actor batch are owned by different layers.
+
 ### Keep missing keys out of the task
 
 A 6-key world has six physical keys. The policy still receives 108 key positions, with the missing entries marked inactive. Key selections use `count_per_world=None, policy_width=108`; the selection map uses `-1` for a missing key.
@@ -564,7 +595,9 @@ Observations, target sampling and rewards must respect this mask. `dense_active(
 env.reset_keyboard(env_ids, variant_ids)
 ```
 
-The reset prepares the new poses and velocities and sends replacement requests to Newton. Newton initializes the new worlds before the task resumes. The task then stores the returned handles and reads the new state on the next observation. During `env.step`, the task saves final observations before resetting when requested; calling `reset_keyboard` directly does not save them by itself.
+The reset prepares the new poses and velocities and sends replacement requests to Newton. A multi-arm variant ID selects both keyboard layout and arm count. Newton initializes the new worlds before the task resumes. The task then stores the returned handles and reads the new state on the next observation. During `env.step`, the typing transition is consumed before reward, termination and final observations; calling `reset_keyboard` directly does not save final observations by itself.
+
+Reset IK is task code. When generating a new reset pose with two arms, the next key's assigned arm targets it; the other targets its first upcoming key in its half, or samples a key in that half. Both solve against the prospective keyboard pose before the complete snapshot is published. Replay resets restore a previously solved snapshot. This half assignment guides the reset only: it does not restrict which arm may press a key during the episode.
 
 For periodic redistribution, `request_variants` records the desired keyboards and `stage_variant_changes` chooses which requests to apply at the boundary. Requesting a variant does not immediately move a live world.
 
@@ -625,6 +658,6 @@ These links pin one published set of implementations. IsaacLab’s dependency ov
 - **Newton:** [worlds.py](https://github.com/ooctipus/newton/blob/44714f493e4f703b207b1bf77b7277a83d042e54/newton/_src/solvers/mujoco/worlds.py) prepares prototype storage, records the graph and orders reset, movement and physics. The [main-to-branch comparison](https://github.com/ooctipus/newton/compare/009158e62b862b3b9d829397d6db583515ae1271...44714f493e4f703b207b1bf77b7277a83d042e54) includes work beyond this bridge.
 - **Custom Warp:** [capture_allocation.py](https://github.com/ooctipus/warp/blob/52da84604e541b77cc0433b86385de5edb620abc/warp/_src/capture_allocation.py) records allocation requests, supplies prepared arrays and checks reuse ordering. The [main-to-branch comparison](https://github.com/ooctipus/warp/compare/500272ef1c27756788526fd888da089990dd6b83...52da84604e541b77cc0433b86385de5edb620abc) also covers changing counts and bounded memory operations. This repository requires access.
 - **GPU Components:** [package source](https://github.com/ooctipus/gpu-components/tree/6cc307cd5066dbd434dc6e7fc1b21b6327e2100f/src/gpu_components) contains `fields.py`, `graph.py`, `directory.py` and `backing.py`: typed storage, graph bindings, instance lookup and physical backing. This is the full source, not just the latest Warp-compatibility diff. The repository is private.
-- **IsaacLab task example:** [keyboard source](https://github.com/ooctipus/IsaacLab/tree/251ab1b86164a593ff1955c8d32bee3b67074971/source/isaaclab_tasks/isaaclab_tasks/contrib/keyboard) contains the configuration, selections and MDP terms shown here; [keyboard_worlds.py](https://github.com/ooctipus/IsaacLab/blob/251ab1b86164a593ff1955c8d32bee3b67074971/source/isaaclab_tasks/isaaclab_tasks/contrib/keyboard/keyboard_worlds.py) sends reset requests to Newton. Its [develop-to-branch comparison](https://github.com/ooctipus/IsaacLab/compare/2b8d48d010f8bbf2caedbde060b7b18e66dd5053...251ab1b86164a593ff1955c8d32bee3b67074971) still includes baseline implementations and optional task optimizations. **It is not a minimal integration patch.**
+- **IsaacLab task example:** [keyboard source](https://github.com/ooctipus/IsaacLab/tree/8fcc40d248b41bb1e648d53950b476da41361ac4/source/isaaclab_tasks/isaaclab_tasks/contrib/keyboard) contains the one- and two-arm configuration, selections and MDP terms shown here; [keyboard_worlds.py](https://github.com/ooctipus/IsaacLab/blob/8fcc40d248b41bb1e648d53950b476da41361ac4/source/isaaclab_tasks/isaaclab_tasks/contrib/keyboard/keyboard_worlds.py) sends reset requests to Newton, and [agents/models.py](https://github.com/ooctipus/IsaacLab/blob/8fcc40d248b41bb1e648d53950b476da41361ac4/source/isaaclab_tasks/isaaclab_tasks/contrib/keyboard/agents/models.py) constructs the shared policy's arm inputs. Its [develop-to-branch comparison](https://github.com/ooctipus/IsaacLab/compare/2b8d48d010f8bbf2caedbde060b7b18e66dd5053...8fcc40d248b41bb1e648d53950b476da41361ac4) still includes baseline implementations and optional task optimizations. **It is not a minimal integration patch.**
 
 This integration requires the custom Warp capture implementation and CUDA virtual-memory support. Newton admits the supported keyboard configuration: the Newton solver, implicit-fast integrator and MJWarp's own collision path. Ordinary MJWarp retains its other numerical paths; this does not mean every path can be used by the growable integration. An unseen topology or changed model layout requires new preparation.

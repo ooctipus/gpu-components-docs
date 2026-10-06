@@ -12,6 +12,8 @@ import TabItem from '@theme/TabItem';
 
 Change the number and kinds of simulated worlds without rebuilding the CUDA graph. GPU Components tracks world locations, stores their data, and shares a memory budget between them.
 
+The [current IsaacLab integration](integration.md#isaaclab-mdp) can reset a world into a different keyboard and change between one and two SO-101 arms. Its 19 keyboard layouts produce 38 prepared world prototypes. The task keeps one observation record per world; the shared policy builds one input per present arm.
+
 ## Example
 
 Two scenes. Pick one; the figures below follow the same choice. The byte sizes and 2 MiB pages are illustrative, not measurements of a complete Newton simulation. One range per prototype keeps the drawing readable; the real integration has separate world, contact, CCD and temporary storage.
