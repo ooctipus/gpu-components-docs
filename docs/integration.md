@@ -18,6 +18,8 @@ We prepare each scene in advance. The rest of these docs use Cartpole and G1, or
 
 This page follows one reset using those same examples, then shows the [physics code](#physics-code), [Newton's setup](#newton-setup) and [IsaacLab MDP code](#isaaclab-mdp). The scene diagrams explain the relationships; the code comes from the keyboard implementation at the [published commits below](#source-snapshot), updated October 6, 2026.
 
+The [Warp integration proposal](./integration/warp.mdx) compares fixed-size execution, Warp main with GPU Components, and proposed Warp APIs for virtual arrays and dynamic counts.
+
 **The full application diff is broader than the integration.** Reading and resetting worlds through their handles is part of the task integration. Keyboard generation, typing rewards and command-scheduling optimizations are application choices. They appear in the same IsaacLab branch, but another task does not need to copy them.
 
 **Before → after:** compare [temporary arrays](#temporary-arrays), [copies](#bounded-copies), [graph setup](#graph-before-after) and [task observations](#observation-before-after). Here, **before** means ordinary execution with a fixed population; **after** means this growable integration. The earlier scratch-helper design is shown separately and labeled as history.

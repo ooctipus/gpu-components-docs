@@ -1,0 +1,17 @@
+---
+title: Warp integration
+sidebar_label: Warp integration
+description: Virtual arrays and GPU counts, compared across fixed-size Warp, Warp main with GPU Components, and proposed Warp APIs.
+slug: /integration/warp
+hide_table_of_contents: true
+---
+
+import WarpIntegrationReview from '@site/src/components/WarpIntegrationReview';
+
+# Warp integration
+
+This proposal focuses on two capabilities: **virtual arrays** and **GPU counts that control captured work**. The examples compare fixed-size execution, Warp main with GPU Components, and proposed Warp support. APIs implemented in our fork are distinguished from proposed additions to Warp main.
+
+For the current Newton, MJWarp and IsaacLab implementation, see [Integration, from reset to physics](../integration.md).
+
+<WarpIntegrationReview />
