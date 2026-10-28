@@ -1,6 +1,6 @@
 export const brief = {
   conclusion: "Keep addresses stable. Make work counts explicit. Let Warp own how its graphs execute.",
-  summary: "Two Warp features would simplify this integration: virtual arrays with explicit backing operations, and GPU counts that control captured work. Newton still decides which worlds exist and when their state is ready.",
+  summary: "Two Warp features simplify different parts of this integration: virtual arrays with explicit backing operations, and GPU counts that control captured work. Count binding is implemented in PR1; virtual-array syntax remains a separate proposal. Newton still decides which worlds exist and when their state is ready.",
   pins: [
     ["Warp", "52da84604e541b77cc0433b86385de5edb620abc", "ooctipus/warp"],
     ["GPU Components", "6cc307cd5066dbd434dc6e7fc1b21b6327e2100f", "ooctipus/gpu-components"],
@@ -28,10 +28,10 @@ export const brief = {
   ],
   countRules: [
     "One symbolic identity, one source and one update point per executable initially. Equal maxima do not make two counts identical.",
-    "Proposed stronger semantics: snapshot each source into retained device storage, then update every occurrence from that snapshot. Today’s updater instead requires sources to remain stable while it reads them.",
-    "Preparation verifies update → consumer completion edges, including conditional bodies. The caller orders all producers before the snapshot; Python call order alone is not a proof.",
-    "Invalid counts or failed updates suppress dependent work and publication and expose a status. Checking count ≤ capacity does not establish count ≤ ready or safe indirect indexing.",
-    "Initially reject multiple update epochs for one identity, unsupported dynamic operations, graph mutation after preparation and concurrent replay sharing mutable updater state.",
+    "PR1 reads live device sources while patching launches; it does not retain a shared snapshot. Sources must remain stable until the update completes.",
+    "Preparation verifies update → consumer completion edges, including supported conditional bodies. The caller orders all producers before the updater; Python call order across independent streams is not a proof.",
+    "Out-of-range counts disable their bound launches and set per-launch errors to -1. Unrelated work and publication are not automatically canceled: callers must inspect or gate on errors. Checking count ≤ capacity does not establish count ≤ ready or safe indirect indexing.",
+    "Each identity has one root update point; a launch cannot mix identities from different points. Updates inside conditional bodies, prebuilt count-graph insertion, CPU/APIC, backward, deterministic and clustered recording are unsupported. Do not assume concurrent replay of shared mutable state is safe.",
     "Array shape and strides remain fixed descriptors. A bounded fill or copy is explicit; zero_() does not silently change to mean only live worlds."
   ],
   steps: [
@@ -51,8 +51,8 @@ export const brief = {
     ["Warp array API", "https://nvidia.github.io/warp/latest/api_reference/_generated/warp.array.html", "External pointer and descriptor support exists; the inspected API has no virtual=True parameter."]
   ],
   plan: [
-    ["1 · Agree on the two contracts", "Storage ownership and count-driven execution", "Finite capacity, aliases, readiness responsibility, read point, failure and concurrent replay semantics are written down."],
-    ["2 · Move count lowering under Warp Graph", "Remove downstream private ABI decoding", "The same kernel runs with distinct equal-bound counts; zero→positive replay, bounded copy/fill and conditional/parallel ordering pass."],
+    ["1 · Document the two contracts", "Storage ownership and count-driven execution", "PR1 defines explicit bindings, bounded counts, read points, failure reporting and capture restrictions. Storage readiness remains the caller’s responsibility."],
+    ["2 · Count lowering under Warp Graph · implemented in PR1", "Remove downstream private ABI decoding", "Count lowering is graph-owned; companion changes remove GPU Components’ binder and Newton’s manual adoption. Fork validation covers zero→positive replay, bounded operations and conditional/parallel ordering."],
     ["3 · Add virtual array allocation", "virtual=True with explicit backing operations", "Reservation and backing have separate lifetimes; aliases retain the owner; shared budgets and safe retirement are supported. Warp owns the reservation created by its virtual array allocation."],
     ["4 · Qualify native Newton on one more solver", "Separate live extents from descriptor size", "State/Control, bulk writes, index lookup and layout are audited before promising general solver support."]
   ]
@@ -85,8 +85,8 @@ with wp.ScopedCapture(device=device) as capture:
 
 wp.capture_launch(capture.graph)`,
     fixedNote: "The graph records 100 rows. Changing the Python variable nworld later would change neither q nor the captured launch.",
-    beforeTitle: "Warp main + GPU Components",
-    beforeStatus: "Newton / MJWarp composition · explicit bindings",
+    beforeTitle: "Earlier GPU Components bridge",
+    beforeStatus: "Historical · October 7 implementation",
     before: `import warp as wp
 from gpu_components import graph as gpc_graph
 
@@ -120,7 +120,7 @@ gpc_graph.instantiate_and_upload(updates, capture.graph)
 wp.capture_launch(capture.graph)`,
     beforeNote: "extent_axis=0 explicitly tells GPU Components which launch dimension to update.",
     afterTitle: "With Warp support · update the launch",
-    afterStatus: "Proposed API · not implemented upstream",
+    afterStatus: "Implemented in PR1 · not in Warp main",
     after: `import warp as wp
 
 @wp.kernel
@@ -138,18 +138,17 @@ live_count = wp.array([100],
 wp.load_module(device=device)
 
 n = wp.CountParameter(maximum=capacity)
-# PROPOSED count binding and update API:
+# PR1: declare sources at the update point.
 with wp.ScopedCapture(
-    device=device,
-    count_sources=((n, live_count),)) as capture:
-    wp.capture_update_counts((n,))
+    device=device, record_launches=True) as capture:
+    wp.capture_update_counts((n,), (live_count,))
     wp.launch(advance, dim=(n, 80),
               inputs=[q], device=device)
 
 wp.capture_launch(capture.graph)`,
-    afterNote: "dim=(n, 80) tells Warp where the changing count is used. count_sources connects n to its GPU value.",
-    result: "Fixed: capture the integer 100. GPU Components: explicitly bind axis 0 to live_count. Proposed Warp: use n in the launch and bind n to live_count.",
-    caution: "The middle column needs no CountParameter or fork capture records. It uses GPU Components’ CUDA bridge and version-checked Warp launch ABI. Updater and consumers share one native graph here. Crossing a conditional boundary needs additional containment records; staying within the same body does not. Existing MJWarp launch sites must explicitly participate in this path.",
+    afterNote: "dim=(n, 80) tells Warp where the changing count is used. capture_update_counts pairs n with live_count at an explicit point in the graph.",
+    result: "Fixed: capture the integer 100. Earlier GPU Components: explicitly bind axis 0 to live_count. PR1: use n in an ordinary launch and bind n to live_count inside Warp.",
+    caution: "The middle column preserves the old bridge for comparison; the companion migration removes that binder. PR1 requires CUDA Toolkit and driver 12.4+, recorded capture, and supported forward launches. The application must order producers before the updater and keep sources stable during its reads.",
   },
   {
     id: "argument", label: "Dynamic count: Kernel argument", title: "Use the same count inside the calculation",
@@ -184,8 +183,8 @@ with wp.ScopedCapture(device=device) as capture:
 
 wp.capture_launch(capture.graph)`,
     fixedNote: "The ordinary integer 100 becomes a captured kernel argument.",
-    beforeTitle: "Warp main + GPU Components",
-    beforeStatus: "Newton / MJWarp composition · argument binding",
+    beforeTitle: "Earlier GPU Components bridge",
+    beforeStatus: "Historical · October 7 implementation",
     before: `import warp as wp
 from gpu_components import graph as gpc_graph
 from gpu_components.graph_data import KernelParameterBinding
@@ -228,9 +227,9 @@ gpc_graph.retain(capture.graph, q, mean)
 gpc_graph.bind(updates, capture.graph, [binding])
 gpc_graph.instantiate_and_upload(updates, capture.graph)
 wp.capture_launch(capture.graph)`,
-    beforeNote: "All three pass an ordinary int to the same numerical kernel. GPU Components explicitly binds argument 2 to live_count; index 0 belongs to Warp’s hidden launch-bounds argument. That indexing knowledge lives outside Warp today.",
+    beforeNote: "All three pass an ordinary int to the same numerical kernel. The old bridge binds argument 2 to live_count; index 0 belongs to Warp’s hidden launch-bounds argument. PR1 moves that layout knowledge into Warp.",
     afterTitle: "With Warp support · pass an integer",
-    afterStatus: "Proposed automatic binding",
+    afterStatus: "Implemented in PR1 · explicit source binding",
     after: `import warp as wp
 
 @wp.kernel
@@ -255,18 +254,17 @@ mean = wp.empty(80, dtype=wp.float32, device=device)
 wp.load_module(device=device)
 
 n = wp.CountParameter(maximum=capacity)
-# PROPOSED capture API:
+# PR1: one binding can serve scalar arguments too.
 with wp.ScopedCapture(
-    device=device,
-    count_sources=((n, live_count),)) as capture:
-    wp.capture_update_counts((n,))
+    device=device, record_launches=True) as capture:
+    wp.capture_update_counts((n,), (live_count,))
     wp.launch(column_mean, dim=80,
               inputs=[q, n, mean], device=device)
 
 wp.capture_launch(capture.graph)`,
-    afterNote: "The kernel still receives an ordinary int. Warp would bind it from n without a numeric argument-position declaration in the composition code. With n = 0, this fixed 80-thread launch must still run and write zero means.",
+    afterNote: "The kernel still receives an ordinary int. Warp binds it from n without a numeric argument-position declaration in the composition code. With a live value of 0, this fixed 80-element launch still runs and writes zero means.",
     result: "A changing count can control a loop or a scalar argument even when the launch size is fixed. This example makes no speedup claim.",
-    caution: "CountParameter as a scalar argument exists in our fork. Automatic source binding and the explicit capture_update_counts call shown on the right are proposed."
+    caution: "PR1 binds int32 scalar occurrences, including multiple uses of one identity. A zero scalar does not disable a fixed-size launch. An out-of-range source disables its bound launch and writes an error."
   },
   {
     id: "memory", label: "Dynamic count: Zero and copy", title: "Touch the live prefix, leave the rest alone",
@@ -290,8 +288,8 @@ with wp.ScopedCapture(device=device) as capture:
 
 wp.capture_launch(capture.graph)`,
     fixedNote: "All 100 rows belong to the operation. There is no spare prefix to leave untouched.",
-    beforeTitle: "Warp main + GPU Components",
-    beforeStatus: "Newton / MJWarp composition · two bounded launches",
+    beforeTitle: "Earlier GPU Components bridge",
+    beforeStatus: "Historical · October 7 implementation",
     before: `import warp as wp
 from gpu_components import graph as gpc_graph
 
@@ -334,7 +332,7 @@ gpc_graph.instantiate_and_upload(updates, capture.graph)
 wp.capture_launch(capture.graph)`,
     beforeNote: "GPU Components updates both launches to the live prefix. The integration supplies the two simple kernels and their bindings; the kernels themselves contain no GPU Components concepts.",
     afterTitle: "With Warp support · declare the extent",
-    afterStatus: "extent exists in our fork; binding is proposed",
+    afterStatus: "Fork memory-operation recording + PR1 binding",
     after: `import warp as wp
 
 wp.init()
@@ -348,11 +346,11 @@ saved = wp.ones((capacity, 80),
                 dtype=wp.float32, device=device)
 
 n = wp.CountParameter(maximum=capacity)
-# PROPOSED capture API:
+# Explicitly opt into recording memory operations.
 with wp.ScopedCapture(
-    device=device,
-    count_sources=((n, live_count),)) as capture:
-    wp.capture_update_counts((n,))
+    device=device, record_launches=True,
+    record_memory_operations=True) as capture:
+    wp.capture_update_counts((n,), (live_count,))
 
     q.zero_(extent=(n, 80))
     wp.copy(saved, q, extent=(n, 80))
