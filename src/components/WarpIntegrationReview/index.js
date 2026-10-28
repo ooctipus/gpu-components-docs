@@ -1,6 +1,7 @@
 import React, {useEffect, useId, useRef, useState} from 'react';
 import CodeBlock from '@theme/CodeBlock';
 import {brief, examples} from './content';
+import DynamicCount from './DynamicCount';
 import styles from './styles.module.css';
 
 function Tabs({label, items, selected, onSelect, children}) {
@@ -55,7 +56,7 @@ class CountParameter:
             raise ValueError("maximum must be a nonnegative int")`}</CodeBlock>
         <p>The data is just <code>maximum</code>. The Python object itself provides identity. Two objects with <code>maximum=1024</code> can represent two independent counts.</p>
         <p className={styles.note}>Simplified from the fork. The full class also rejects <code>int(n)</code>, <code>bool(n)</code>, arithmetic and comparisons so the placeholder cannot silently become a fixed number.</p>
-        <a href="https://github.com/ooctipus/warp/blob/52da84604e541b77cc0433b86385de5edb620abc/warp/_src/types.py#L54">Actual CountParameter definition</a>
+        <a href="https://github.com/dylanturpin/warp-octi/blob/ab467d988125a3545a8bfcae0152dd137e6f0b8e/warp/_src/types.py#L54">Actual CountParameter definition at PR1</a>
       </section>
       <section className={styles.column}>
         <h3>How the application uses it</h3>
@@ -72,13 +73,17 @@ live_count = wp.array([100],
 n = wp.CountParameter(maximum=1024)
 capacity = wp.upper_bound(n)  # Python int: 1024
 
-# Proposed capture binding: n gets its value here.
-count_sources = ((n, live_count),)
-
 # A launch shape can refer to this placeholder.
-launch_shape = (n, 80)`}</CodeBlock>
+launch_shape = (n, 80)
+
+# Inside recorded capture, before its consumers:
+with wp.ScopedCapture(
+    device=device, record_launches=True
+) as capture:
+    wp.capture_update_counts((n,), (live_count,))
+    # Launch kernels using n here.`}</CodeBlock>
         <p><code>n</code> does not contain 100 or point to <code>live_count</code>. The binding connects them. Reusing the same <code>n</code> tells Warp which operations must use the same count.</p>
-        <p className={styles.note}><code>CountParameter</code> and <code>upper_bound</code> exist in the fork. The <code>count_sources</code> capture API is proposed.</p>
+        <p className={styles.note}>PR1 implements explicit <code>capture_update_counts(counts, sources)</code> bindings. There is no capture-level source declaration. This excerpt shows the binding location; the launch-size example includes a consumer.</p>
       </section>
     </div>
     <div className={styles.countDemo}>
@@ -100,7 +105,7 @@ launch_shape = (n, 80)`}</CodeBlock>
     <DataTable headers={['Part of Warp', 'What it does', 'Status']} rows={[
       ['Python type', 'Stores maximum and preserves the parameter’s identity.', 'In our fork'],
       ['Launch recording', 'For dim=(n, 80), remembers that axis 0 uses this n. A scalar kernel argument can use the same n. Captures integer maxima initially.', 'In our fork'],
-      ['Binding and replay', 'Binds n to live_count. At the update point, reads its value and updates every recorded use before the dependent kernels run.', 'GPU Components does this today; proposed inside Warp'],
+      ['Binding and replay', 'Binds n to live_count. At the update point, reads its value and updates every recorded use before the dependent kernels run.', 'Implemented inside Warp in PR1'],
       ['Preparation check', 'Refuses to replay a graph whose count bindings are incomplete.', 'In our fork'],
     ]} />
     <p>A numerical kernel still receives ordinary integers and arrays. It does not receive a <code>CountParameter</code> object.</p>
@@ -132,7 +137,7 @@ function CodeExamples() {
           <p>{example.assumption}</p><p>{example.caution}</p>
           <p className={styles.note}>Source-checked excerpts, not complete applications. The GPU Components path requires a qualified Warp version and its CUDA bridge.</p>
         </details>
-        {id === 'launch' && <details className={styles.details}><summary>Proposed count semantics</summary>
+        {id === 'launch' && <details className={styles.details}><summary>PR1 count semantics</summary>
           <ol>{brief.countRules.map(rule => <li key={rule}>{rule}</li>)}</ol>
         </details>}
       </>;
@@ -206,12 +211,13 @@ function Recommendation() {
 function ReviewEvidence() {
   return <>
     <h2>Review evidence</h2>
-    <p>This is a source and API review of the October 7, 2026 snapshot below. No new physics benchmark or runtime validation was performed for this review. Proposed APIs are not implemented.</p>
+    <p>The findings and pins below preserve the October 7, 2026 review as historical evidence. The Dynamic count tab and right-hand count examples are updated to PR1 commit <code>ab467d98</code> on October 28. Virtual-array syntax remains a separate proposal.</p>
+    <div className={styles.callout}><strong>What changed after that review</strong><p>PR1 moves count binding and replay updates into Warp, shares launch math and helper-module ownership, rejects failed preparation and source/error overlap, and removes the fixed scalar-occurrence cap. The companion GPU Components and Newton changes remove the downstream binder and manual adoption.</p><p>Recorded validation at that commit: 472 Warp tests, 66 Newton tests, and 3,458 successful SO101 episodes out of 3,715 (93.08%) across 76 heterogeneous worlds. Dynamic resets retained one prepared graph. This is one qualified RTX 5090 / CUDA 12.9 setup, not an upstream platform matrix.</p><a href="https://github.com/ooctipus/warp/pull/1">PR1 implementation and validation</a></div>
     {brief.findings.map(finding => <section key={finding.title} className={styles.finding}>
       <p className={styles.status}>{finding.priority}</p><h3>{finding.title}</h3><p>{finding.text}</p>
       <a href={finding.file}>Inspect the reviewed implementation</a>
     </section>)}
-    <h3>Source snapshot</h3>
+    <h3>Historical source snapshot · October 7</h3>
     <DataTable headers={['Repository', 'Reviewed commit']} rows={brief.pins.map(([name, sha, repo]) =>
       [name, <a key={sha} href={`https://github.com/${repo}/commit/${sha}`}>{sha.slice(0, 12)}</a>])} />
     <p className={styles.note}>Warp’s custom delta was checked against upstream <code>500272ef1c27</code>. The fork includes independent bug fixes; it should not be proposed as one indivisible VMM patch. Some repository links require access.</p>
@@ -223,22 +229,22 @@ function ReviewEvidence() {
 function ApiDecisions() {
   return <>
     <h2>What Warp needs to provide</h2>
-    <p>VMM itself works with externally owned pointer-backed arrays. To run changing populations efficiently under a prepared graph, our Warp fork preserves count identities and capture records; GPU Components currently performs the executable updates. The proposal adds <code>virtual=True</code> with explicit backing operations and moves count binding and executable preparation into Warp.</p>
+    <p>VMM itself works with externally owned pointer-backed arrays. PR1 now keeps count identities, capture records, binding and executable updates inside Warp. The separate <code>virtual=True</code> proposal concerns array reservation and explicit backing operations; it is not required to use dynamic counts with ordinary arrays.</p>
     <DataTable headers={['Order', 'Deliverable', 'Acceptance']} rows={brief.plan} />
-    <h3>Decide these before agreeing on syntax</h3>
+    <h3>Remaining API decisions</h3>
     <ol>
       <li>For <code>virtual=True</code>, which operations map backing, share a physical-memory budget and retire pages safely while keeping array addresses stable?</li>
-      <li>For <code>CountParameter</code>, when is the GPU value sampled, which operations can use it, and how are zero work, invalid counts and conditional consumers handled?</li>
+      <li>For upstream count support, agree on PR1’s explicit read points and restrictions, its minimal capture prerequisites, and how count operations will integrate with APIC and deferred graph construction. Snapshot semantics are not implemented.</li>
     </ol>
     <h3>What not to promise</h3>
     <p>Unlimited address growth; arbitrary new topology without preparation; allocation-free or stall-free mapping; transparent support for every Newton solver; concurrent replay of shared mutable graph state.</p>
-    <h3>First validation program</h3>
-    <p>One strided array, two distinct counts with equal maxima, one conditional branch and parallel consumers. Exercise zero→positive counts, insufficient backing, retained views, failed preparation and reused memory. Then qualify one additional Newton solver. Compare performance only after those contracts hold.</p>
+    <h3>Validation beyond the current integration</h3>
+    <p>Count tests cover zero→positive counts, independent equal-bound identities, conditional and parallel consumers, retained sources, invalid counts and failed preparation. Backing readiness and reused memory require separate storage tests. Broader GPU/driver coverage and additional Newton solver qualification remain separate from PR1’s demonstrated path.</p>
   </>;
 }
 
 const sections = [
-  {id: 'recommendation', label: 'Recommendation'}, {id: 'one-reset', label: 'One reset'},
+  {id: 'recommendation', label: 'Recommendation'}, {id: 'dynamic-count', label: 'Dynamic count'}, {id: 'one-reset', label: 'One reset'},
   {id: 'examples', label: 'Before / after'}, {id: 'review-evidence', label: 'Review evidence'},
   {id: 'api-decisions', label: 'API decisions'},
 ];
@@ -259,10 +265,9 @@ export default function WarpIntegrationReview() {
     window.history.replaceState(null, '', `#${id}`);
   }
   return <div className={styles.review}>
-    <p className={styles.lead}>{brief.conclusion}</p>
-    <p>{brief.summary}</p>
+    {selected !== 'dynamic-count' && <><p className={styles.lead}>{brief.conclusion}</p><p>{brief.summary}</p></>}
     <Tabs label="Warp integration review" items={sections} selected={selected} onSelect={select}>
-      {id => ({recommendation: <Recommendation />, 'one-reset': <MemoryDemo />, examples: <CodeExamples />,
+      {id => ({recommendation: <Recommendation />, 'dynamic-count': <DynamicCount />, 'one-reset': <MemoryDemo />, examples: <CodeExamples />,
         'review-evidence': <ReviewEvidence />, 'api-decisions': <ApiDecisions />})[id]}
     </Tabs>
     <p className={styles.footer}>Review material, not an upstream API commitment. The animation is an explanatory model; no timings are inferred from it.</p>

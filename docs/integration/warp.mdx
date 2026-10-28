@@ -1,7 +1,7 @@
 ---
 title: Warp integration
 sidebar_label: Warp integration
-description: Virtual arrays and GPU counts, compared across fixed-size Warp, Warp main with GPU Components, and proposed Warp APIs.
+description: A visual guide to GPU counts across caller, Warp and CUDA, with PR1 examples and a separate virtual-array proposal.
 slug: /integration/warp
 hide_table_of_contents: true
 ---
@@ -10,7 +10,7 @@ import WarpIntegrationReview from '@site/src/components/WarpIntegrationReview';
 
 # Warp integration
 
-This proposal focuses on two capabilities: **virtual arrays** and **GPU counts that control captured work**. The examples compare fixed-size execution, Warp main with GPU Components, and proposed Warp support. APIs implemented in our fork are distinguished from proposed additions to Warp main.
+Explore **virtual arrays** and **GPU counts that control captured work**. The Dynamic count guide and count examples follow [Warp PR1](https://github.com/ooctipus/warp/pull/1); virtual-array syntax remains a separate proposal. These fork APIs are not yet in Warp main.
 
 For the current Newton, MJWarp and IsaacLab implementation, see [Integration, from reset to physics](../integration.md).
 
