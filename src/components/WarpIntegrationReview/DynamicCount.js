@@ -3,6 +3,13 @@ import CodeBlock from '@theme/CodeBlock';
 import styles from './dynamicCount.module.css';
 
 const source = 'https://github.com/dylanturpin/warp-octi/blob/ab467d988125a3545a8bfcae0152dd137e6f0b8e';
+const apiGroups = [
+  {title: 'Launch facts', status: 'Already on the base branch', names: ['CapturedLaunch', 'capture_get_launches'], reason: 'The binder needs to know which node uses n and where. PR1 reuses the canonical launch record. Exposing an inspection getter is a separate API choice; an application does not have to call it.'},
+  {title: 'Conditional support', status: 'Already on the base branch', names: ['CapturedConditionalBody', 'capture_get_conditional_bodies'], reason: 'Containment facts let the binder prove ordering when a consumer is inside an if/while body. Straight-line count updates do not require this extra scope, and the binder uses the internal facts rather than requiring a public getter call.'},
+  {title: 'Recorded fills and copies', status: 'Already on the base branch · separate extension', names: ['CapturedCopy', 'CapturedFill', 'capture_get_memory_operations'], reason: 'These describe memory operations. They are useful for explicit count-sized fills/copies and other capture consumers. A count used in ordinary kernel dimensions or integer arguments does not require them.'},
+  {title: 'Allocation discovery and temporary storage', status: 'Already on the base branch · not a count dependency', names: ['capture_allocation_bytes', 'capture_allocation_order', 'capture_discovery_memory', 'capture_get_allocations', 'capture_get_transient_regions', 'capture_region_precedes', 'capture_transient'], reason: 'These belong to the typed-allocation and transient-memory experiment: discover storage requests, describe lifetimes and prove reuse ordering. Dynamic counts work with ordinary, fully allocated arrays without these APIs.'},
+  {title: 'Count diagnostics', status: 'Added by PR1', names: ['capture_get_count_bound_launches', 'capture_get_count_update_errors'], reason: 'These let callers inspect which launches were bound and match their error words. They support observability; neither getter performs the update. The update entry point is capture_update_counts(counts, sources).'},
+];
 const fields = [
   {name: 'node_handle', kind: 'Recorded target', phase: 'Capture', value: 'update node U', why: 'Identifies the updater node so capture completion can attach the finished table to it.', minimum: 'The operation needs a target. This handle names the updater; target consumer handles live in the prepared table.'},
   {name: 'bindings', kind: 'Explicit input', phase: 'Capture → replay', value: '((n, live_count),)', why: 'Pairs each symbolic identity with its device source and retains both. The maximum stays on n.', minimum: 'Essential relationship. Separate counts and sources collections would duplicate this paired relationship.'},
@@ -27,6 +34,51 @@ export default function DynamicCount() {
   const field = fields[fieldIndex];
   const currentPhase = phases[phase];
   return <article className={styles.guide}>
+    <header className={styles.intro}>
+      <p className={styles.eyebrow}>Dynamic count · the implementation map</p>
+      <h2>How a Python count reaches CUDA</h2>
+      <p><code>CountParameter</code> names a count. Warp records its uses, prepares a GPU updater, and lets CUDA execute the updated launches. It does <strong>not</strong> require an allocation-discovery API.</p>
+      <p className={styles.note}>Source-checked against <a href="https://github.com/ooctipus/warp/pull/1">PR1</a> at <code>ab467d98</code>. The C++ file is <code>warp.cpp</code>. These count APIs are implemented in the fork, not Warp main.</p>
+    </header>
+
+    <section aria-labelledby="dc-interface-title">
+      <h3 id="dc-interface-title">The caller crosses one native interface</h3>
+      <figure className={styles.nativePath}>
+        <div><b>Application</b><code>wp.capture_update_counts</code><code>wp.launch</code><span>Public Python API</span></div><span aria-hidden="true">→</span>
+        <div><b>context.py</b><span>Validate, record count uses, own Graph resources</span><code>runtime.core.wp_cuda_…</code></div><span aria-hidden="true">→</span>
+        <div><b>ctypes → warp.so / warp.dll</b><span>C-compatible exported functions</span><code>warp.h declares them</code><code>warp.cu implements CUDA work</code></div><span aria-hidden="true">→</span>
+        <div><b>CUDA</b><span>Graph/node APIs on the host; updater and numerical kernels on the GPU</span></div>
+        <figcaption>A header declares the interface at build time. It is not another runtime stage. A CUDA call does not first pass through <code>warp.cpp</code> just because both files belong to the same library.</figcaption>
+      </figure>
+      <div className={styles.fileMap}>
+        <div><a href={`${source}/warp/native/warp.h#L812`}>warp.h</a><p>The native function contract: names, argument types and return types. PR1 declares four count helpers here; Python registers matching <code>ctypes</code> signatures.</p></div>
+        <div><a href={`${source}/warp/native/warp.cu#L3974`}>warp.cu</a><p>The CUDA implementation. Host code prepares graph nodes and loads the updater. Embedded GPU code reads counts and changes bounds, grids and scalar arguments during replay. A <code>.cu</code> file can contain both host and GPU code.</p></div>
+        <div><a href={`${source}/warp/native/warp.cpp`}>warp.cpp</a><p>Shared/CPU runtime implementation. This PR updates a shared layout-helper call and adds failure stubs for builds without CUDA, so the native interface remains available. It does not implement a second count updater.</p></div>
+        <div><a href={`${source}/warp/native/launch.h`}>launch.h</a><p>One definition of launch-bounds layout and grid calculation, reused by ordinary launches and the updater. It contains no count registry, memory allocator or public Python API.</p></div>
+        <div><a href={`${source}/warp/native/apic.cpp`}>apic.cpp / apic.cu</a><p>API Capture records an operation stream for CPU replay and graph save/load, including rebuilding CUDA graphs. PR1 changes its layout-helper references to use <code>launch.h</code>; it does <strong>not</strong> add dynamic-count support to APIC.</p></div>
+      </div>
+      <figure className={styles.sharedHeader}><code>launch.h</code><span>shared at compile time →</span><div><span>ordinary launch code</span><span>GPU count updater</span><span>APIC layout reconstruction</span></div><figcaption>APIC appears in this diff because duplicated layout calculations were consolidated. Count replay still uses the live CUDA graph path.</figcaption></figure>
+    </section>
+
+    <section className={styles.section} aria-labelledby="dc-calls-title">
+      <h3 id="dc-calls-title">Which interface is called when?</h3>
+      <div className={styles.callSteps}>
+        <div><b>Capture</b><code>capture_update_counts(counts, sources)</code><span>↓ context.py → ctypes</span><code>wp_cuda_count_updater_launch</code><p>Record an updater node before its consumers.</p></div>
+        <div><b>Preparation · capture_end</b><code>wp_cuda_count_binding_size</code><code>wp_cuda_count_binding_prepare</code><code>wp_cuda_count_updater_bind</code><p>Size the records, prepare each target, then attach the GPU table. Warp retains the resources on Graph.</p></div>
+        <div><b>Replay · GPU</b><code>cudaGraphKernelNodeSetParam</code><code>cudaGraphKernelNodeSetGridDim</code><code>cudaGraphKernelNodeSetEnabled</code><p>The updater uses CUDA’s device APIs. There is no Python callback for each count update.</p></div>
+      </div>
+    </section>
+
+    <section className={styles.section} aria-labelledby="dc-surface-title">
+      <h3 id="dc-surface-title">Why does the PR show so many APIs?</h3>
+      <p><strong>14 of the 16 names below were already public on <code>mem_fragmentation</code>.</strong> Regenerating <code>docs/api_reference/warp.rst</code> added their missing index entries to PR1’s documentation diff. Those additions are not evidence that implementing a count requires all these features.</p>
+      <div className={styles.apiGroups}>{apiGroups.map(group => <section key={group.title}><div><h4>{group.title}</h4><small>{group.status}</small></div><div>{group.names.map(name => <code key={name}>{name}</code>)}</div><p>{group.reason}</p></section>)}</div>
+      <p>Against this base, PR1 adds only three public exports: <code>capture_update_counts</code> and the two count diagnostic getters. <code>CountParameter</code>, <code>upper_bound</code> and the capture records already exist on that base. An upstream proposal must still account for its minimal prerequisites.</p>
+      <p className={styles.note}>Compare the <a href="https://github.com/ooctipus/warp/blob/63e41fc1d53eedc931d3492c64da063cf604f71b/warp/__init__.py#L248">base exports</a> with the <a href={`${source}/warp/__init__.py#L470`}>PR1 exports</a>. The unrelated allocation APIs should be reviewed as a separate feature, not justified by CountParameter.</p>
+    </section>
+
+    <details className={styles.details}>
+      <summary>Explore replay behavior, the five retained fields and supported limits</summary>
     <header className={styles.intro}>
       <p className={styles.eyebrow}>A visual guide · Warp PR1</p>
       <h2>One graph. A different amount of work.</h2>
@@ -157,5 +209,6 @@ class _CountUpdate:
       <p>Warp’s <a href="https://github.com/NVIDIA/warp/issues/1659">deferred graph proposal</a> uses its APIC operation stream. Long term, count uses and update points should integrate with that representation, with CUDA handles created during native graph construction. That is an integration direction, not support already delivered by PR1.</p>
       <footer className={styles.references}><strong>Read the source</strong><a href={`${source}/warp/_src/types.py#L54`}>Count identity</a><a href={`${source}/warp/_src/context.py#L13980`}>Public binding API</a><a href={`${source}/warp/_src/context.py#L14216`}>Preparation</a><a href={`${source}/warp/native/launch.h`}>Shared launch math</a><a href="https://docs.nvidia.com/cuda/archive/12.9.0/cuda-runtime-api/group__CUDART__GRAPH.html">CUDA graph APIs</a></footer>
     </section>
+    </details>
   </article>;
 }
