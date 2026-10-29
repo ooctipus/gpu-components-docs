@@ -1,7 +1,8 @@
 import React, {useEffect, useId, useRef, useState} from 'react';
 import CodeBlock from '@theme/CodeBlock';
-import {brief, examples} from './content';
+import {brief, examples, warpSource} from './content';
 import DynamicCount from './DynamicCount';
+import LandedInWarp from './LandedInWarp';
 import styles from './styles.module.css';
 
 function Tabs({label, items, selected, onSelect, children}) {
@@ -56,7 +57,7 @@ class CountParameter:
             raise ValueError("maximum must be a nonnegative int")`}</CodeBlock>
         <p>The data is just <code>maximum</code>. The Python object itself provides identity. Two objects with <code>maximum=1024</code> can represent two independent counts.</p>
         <p className={styles.note}>Simplified from the fork. The full class also rejects <code>int(n)</code>, <code>bool(n)</code>, arithmetic and comparisons so the placeholder cannot silently become a fixed number.</p>
-        <a href="https://github.com/dylanturpin/warp-octi/blob/ab467d988125a3545a8bfcae0152dd137e6f0b8e/warp/_src/types.py#L54">Actual CountParameter definition at PR1</a>
+        <a href={`${warpSource}/warp/_src/types.py#L54`}>Actual CountParameter definition in the merged fork</a>
       </section>
       <section className={styles.column}>
         <h3>How the application uses it</h3>
@@ -135,7 +136,7 @@ function CodeExamples() {
         <details className={styles.details}>
           <summary>Setup assumptions and implementation limits</summary>
           <p>{example.assumption}</p><p>{example.caution}</p>
-          <p className={styles.note}>Source-checked excerpts, not complete applications. The GPU Components path requires a qualified Warp version and its CUDA bridge.</p>
+          <p className={styles.note}>Source-checked excerpts, not complete applications. The middle column preserves the historical GPU Components implementation; the merged fork uses Warp’s own binder.</p>
         </details>
         {id === 'launch' && <details className={styles.details}><summary>PR1 count semantics</summary>
           <ol>{brief.countRules.map(rule => <li key={rule}>{rule}</li>)}</ol>
@@ -195,14 +196,15 @@ function MemoryDemo() {
 
 function Recommendation() {
   return <>
-    <h2>What to ask Warp for</h2>
+    <h2>What to propose upstream</h2>
+    <p>GPU counts have landed in the fork. General virtual-array backing is still a proposal; allocation discovery only reserves temporary addresses for a nonreplayable preparation pass.</p>
     <DataTable headers={['Capability', 'Why we need it', 'Recommendation']} rows={[
       ['Virtual array allocation', 'Reserve stable addresses and manage physical backing separately.', 'Adopt virtual=True as the simple entry point; define backing and shared-budget operations alongside it.'],
       ['GPU-count-driven graphs', 'A pointer staying fixed does not update launch bounds, scalar arguments or memory-operation lengths.', 'Warp owns binding, lowering, preparation and executable lifetime.'],
     ]} />
     <h2>Proposed ownership</h2><DataTable headers={['Owner', 'Owns', 'Boundary']} rows={brief.ownership} />
     <h2>Where <code>virtual=True</code> fits</h2>
-    <p>Use <code>virtual=True</code> when Warp creates a virtual array. Warp owns the reservation; mapping, shared budgets and retirement have explicit operations. <code>CountParameter</code> independently controls how much work runs.</p>
+    <p>In the proposal, <code>virtual=True</code> would make Warp own an array’s reservation; mapping, shared budgets and retirement would have explicit operations. This syntax is not implemented. <code>CountParameter</code> already independently controls how much work runs.</p>
     <DataTable headers={['Different quantities', 'Illustrative value', 'Meaning']} rows={brief.concepts} />
     <p className={styles.note}>These prefix values illustrate one moment, not a universal equality. Readiness may shrink while extra pages remain mapped. Indirect accesses need separate bounds guarantees.</p>
   </>;
@@ -211,7 +213,7 @@ function Recommendation() {
 function ReviewEvidence() {
   return <>
     <h2>Review evidence</h2>
-    <p>The findings and pins below preserve the October 7, 2026 review as historical evidence. The Dynamic count tab and right-hand count examples are updated to PR1 commit <code>ab467d98</code> on October 28. Virtual-array syntax remains a separate proposal.</p>
+    <p>The findings and pins below preserve the October 7, 2026 review as historical evidence, followed by PR1’s October 28 validation. For current status and PR4’s results, see <a href="#landed-in-warp">Landed in Warp</a>. The Dynamic count guide follows merged commit <code>e1089a34</code>; virtual-array syntax remains a proposal.</p>
     <div className={styles.callout}><strong>What changed after that review</strong><p>PR1 moves count binding and replay updates into Warp, shares launch math and helper-module ownership, rejects failed preparation and source/error overlap, and removes the fixed scalar-occurrence cap. The companion GPU Components and Newton changes remove the downstream binder and manual adoption.</p><p>Recorded validation at that commit: 472 Warp tests, 66 Newton tests, and 3,458 successful SO101 episodes out of 3,715 (93.08%) across 76 heterogeneous worlds. Dynamic resets retained one prepared graph. This is one qualified RTX 5090 / CUDA 12.9 setup, not an upstream platform matrix.</p><a href="https://github.com/ooctipus/warp/pull/1">PR1 implementation and validation</a></div>
     {brief.findings.map(finding => <section key={finding.title} className={styles.finding}>
       <p className={styles.status}>{finding.priority}</p><h3>{finding.title}</h3><p>{finding.text}</p>
@@ -244,13 +246,14 @@ function ApiDecisions() {
 }
 
 const sections = [
+  {id: 'landed-in-warp', label: 'Landed in Warp'},
   {id: 'recommendation', label: 'Recommendation'}, {id: 'dynamic-count', label: 'Dynamic count'}, {id: 'one-reset', label: 'One reset'},
   {id: 'examples', label: 'Before / after'}, {id: 'review-evidence', label: 'Review evidence'},
   {id: 'api-decisions', label: 'API decisions'},
 ];
 
 export default function WarpIntegrationReview() {
-  const [selected, setSelected] = useState('recommendation');
+  const [selected, setSelected] = useState('landed-in-warp');
   useEffect(() => {
     const readHash = () => {
       const hash = window.location.hash.slice(1);
@@ -265,11 +268,11 @@ export default function WarpIntegrationReview() {
     window.history.replaceState(null, '', `#${id}`);
   }
   return <div className={styles.review}>
-    {selected !== 'dynamic-count' && <><p className={styles.lead}>{brief.conclusion}</p><p>{brief.summary}</p></>}
+    {!['dynamic-count', 'landed-in-warp'].includes(selected) && <><p className={styles.lead}>{brief.conclusion}</p><p>{brief.summary}</p></>}
     <Tabs label="Warp integration review" items={sections} selected={selected} onSelect={select}>
-      {id => ({recommendation: <Recommendation />, 'dynamic-count': <DynamicCount />, 'one-reset': <MemoryDemo />, examples: <CodeExamples />,
+      {id => ({'landed-in-warp': <LandedInWarp />, recommendation: <Recommendation />, 'dynamic-count': <DynamicCount />, 'one-reset': <MemoryDemo />, examples: <CodeExamples />,
         'review-evidence': <ReviewEvidence />, 'api-decisions': <ApiDecisions />})[id]}
     </Tabs>
-    <p className={styles.footer}>Review material, not an upstream API commitment. The animation is an explanatory model; no timings are inferred from it.</p>
+    <p className={styles.footer}>Fork behavior is pinned to a source revision; proposals and historical evidence are labeled separately. Illustrations do not execute CUDA or establish performance.</p>
   </div>;
 }
