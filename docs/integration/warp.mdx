@@ -1,7 +1,7 @@
 ---
 title: Warp integration
 sidebar_label: Warp integration
-description: "Every feature and fix in our Warp fork: capture records, GPU counts, bounded memory operations, allocation discovery, reuse proofs and shared native mechanisms."
+description: "Follow one SO101 reset to understand what ordinary GPU graph replay is missing and how dynamic counts, capture records and allocation planning fill those gaps."
 slug: /integration/warp
 hide_table_of_contents: true
 ---
@@ -10,8 +10,6 @@ import WarpIntegrationReview from '@site/src/components/WarpIntegrationReview';
 
 # Warp integration
 
-Start with **Landed in Warp** for the complete fork delta, then explore **Dynamic count** for the caller → Warp → CUDA explanation. This guide follows `mem_fragmentation` at [`e1089a34`](https://github.com/ooctipus/warp/commit/e1089a344bc245d9ea22da687a402224b72b20b9), after PRs #1 and #4. These fork APIs are not yet in Warp main; general virtual-array syntax remains a proposal.
-
-For the current Newton, MJWarp and IsaacLab implementation, see [Integration, from reset to physics](../integration.md).
-
 <WarpIntegrationReview />
+
+For the full Newton, MJWarp and IsaacLab reset sequence, see [Integration, from reset to physics](../integration.md).
