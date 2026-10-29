@@ -5,22 +5,64 @@ import styles from './styles.module.css';
 
 export default function LandedInWarp() {
   return <article>
-    <h2>What our Warp fork adds to main</h2>
-    <p><strong>Warp can record the facts needed to prepare a graph, let GPU counts change its work, and discover temporary storage before choosing its backing.</strong> Numerical code still uses ordinary Warp arrays and launches. Newton owns worlds and resets; GPU Components owns storage policy.</p>
-    <p className={styles.note}>As of October 29, 2026: landed in <a href="https://github.com/ooctipus/warp/commit/e1089a344bc245d9ea22da687a402224b72b20b9">mem_fragmentation · e1089a34</a>, including PRs <a href="https://github.com/ooctipus/warp/pull/1">#1</a> and <a href="https://github.com/ooctipus/warp/pull/4">#4</a>. “Landed” means our fork, not NVIDIA Warp main. <a href="https://github.com/ooctipus/warp/compare/0c1ed78f7b4ee397534e5bd1cea632af618d900f...e1089a344bc245d9ea22da687a402224b72b20b9">Full fork delta</a>: 51 files from the common ancestor <code>0c1ed78f</code>. Upstream main was checked at <a href="https://github.com/NVIDIA/warp/commit/104afd1f4b1f81ff87a8ee6be56c46807d8e3451">104afd1f</a>; its seven newer commits are not incorporated in this fork snapshot.</p>
-
+    <h2>One robot resets. The simulation keeps running.</h2>
+    <p>Imagine training SO101 robots to press keyboard keys. Each simulated world has its own robot and keyboard. Some worlds use one arm; others use two. When one episode ends, we want to reset that world with a different setup and keep stepping the whole batch.</p>
     <div className={styles.twoColumns}>
       <section className={styles.prototype}>
-        <h3>Execution: how much work runs?</h3>
-        <p>GPU count → Warp updater → CUDA kernel nodes</p>
-        <p>Change launch bounds and integer arguments on replay. Array addresses, shapes and graph topology stay fixed.</p>
+        <h3>Before the reset</h3>
+        <p><strong>3</strong> single-arm worlds<br /><strong>2</strong> dual-arm worlds</p>
+        <p>One single-arm episode finishes.</p>
       </section>
       <section className={styles.prototype}>
-        <h3>Storage: where do temporaries live?</h3>
-        <p>Discover requests → caller chooses arrays → capture again</p>
-        <p>Substitute final arrays before recording their pointers and strides. Reuse needs a proven completion order.</p>
+        <h3>After the reset</h3>
+        <p><strong>2</strong> single-arm worlds<br /><strong>3</strong> dual-arm worlds</p>
+        <p>That world starts a dual-arm episode with a larger keyboard.</p>
       </section>
     </div>
+    <p><strong>The goal: reuse the same prepared GPU program as the amount of work changes.</strong> This is a toy example: both robot/keyboard variants are prepared in advance. Adding an entirely new variant can still require preparation.</p>
+
+    <h3>What is missing from ordinary replay?</h3>
+    <p>Warp turns Python kernel functions into GPU code. CUDA provides a <strong>graph</strong>: a recorded set of GPU operations and their execution order. Replaying it avoids asking Python to submit every operation again.</p>
+    <p>But an ordinary captured launch still has the size it was recorded with. Writing “2” into a GPU count array does not, by itself, change a launch recorded for three worlds. Nor does it shorten a copy, prepare memory for the new world, or prove when temporary memory can be reused.</p>
+    <p>Applications can work around this by launching the maximum size and checking bounds inside kernels, or by reading counts back to the CPU and updating work. Our fork adds the missing connections inside Warp:</p>
+    <ol>
+      <li><strong>Connect a GPU count to the work that uses it.</strong></li>
+      <li><strong>Remember exactly what was recorded and how it is ordered.</strong></li>
+      <li><strong>Expose temporary storage needs before choosing where those arrays live.</strong></li>
+    </ol>
+
+    <h3>Three components we landed</h3>
+    <section className={styles.finding}>
+      <h4>1. Dynamic counts — change how much work runs</h4>
+      <p>We added a count placeholder, <code>CountParameter</code>, and an explicit binding to its GPU value. Before the relevant kernels run, Warp’s updater reads that value and changes their launch sizes or integer arguments. Recorded zero, fill and copy operations can use the same count.</p>
+      <p><strong>In the example:</strong> the single-arm branch processes two worlds and the dual-arm branch processes three, using the same graph. The arrays keep their capacity; the count selects the amount of work. Changing the count does not allocate or initialize memory.</p>
+    </section>
+    <section className={styles.finding}>
+      <h4>2. Capture records — know what must change, and when</h4>
+      <p>CUDA knows about kernels and dependencies, but not which Python count or array each operation meant. Warp now retains those facts alongside the graph: the original arguments, count uses, resources and enclosing conditional branches.</p>
+      <p><strong>In the example:</strong> Warp can find every launch that uses the single-arm count and check that its updater finishes first. Callers no longer need to decode Warp’s internal kernel arguments to bind counts. This is the foundation behind component 1; normal application code does not need to inspect every record.</p>
+    </section>
+    <section className={styles.finding}>
+      <h4>3. Allocation planning — choose storage before recording its addresses</h4>
+      <p>Physics calculations create temporary arrays. A byte allocator alone does not know their shapes or when GPU work finishes using them. Our experimental discovery pass records those requests; the caller supplies the final arrays, then captures the calculation again. Warp can check completion order before allowing overlapping temporary storage.</p>
+      <p><strong>In the example:</strong> GPU Components can supply storage for each prepared variant, including reusable scratch space where the required promises and ordering checks hold. The solver keeps ordinary array-allocation calls. This is optional: dynamic counts also work with fully allocated arrays.</p>
+    </section>
+
+    <h3>How the pieces meet at a reset</h3>
+    <div className={styles.graph} aria-label="Reset sequence: prepare state, update work, execute physics">
+      <div><strong>Newton + GPU Components</strong><br />Provide backed storage, initialize the new episode, then publish counts.</div>
+      <div className={styles.branches}><div><strong>→ Warp</strong><br />Update the recorded work sizes and preserve execution order.</div></div>
+      <div><strong>→ CUDA</strong><br />Execute the prepared kernels for the current worlds.</div>
+    </div>
+    <p>Newton chooses the world and reset state. GPU Components manages storage. Warp connects ordinary arrays and counts to executable GPU work. The fork does not yet provide a general virtual-array/backing API or decide automatically when memory is ready.</p>
+    <p>The fork also fixes padded solver layouts, nested indexing and resource lifetimes, and reduces host argument-packing overhead. Shared launch calculations and graph ownership keep these features inside Warp’s existing machinery.</p>
+    <p className={styles.note}>These additions have landed in our Warp fork, not NVIDIA Warp main. The tested SO101 integration reused one prepared graph through heterogeneous resets; the illustration above explains the mechanism, not a timing guarantee.</p>
+    <p><a href="#dynamic-count">Explore how a count reaches CUDA →</a></p>
+
+    <details className={styles.details}>
+      <summary>Complete reference: APIs, implementation, limits and validation</summary>
+      <p>The three components above are expanded below into their public interfaces and supporting changes. This reference accounts for all 21 added public exports.</p>
+    <p className={styles.note}>As of October 29, 2026: landed in <a href="https://github.com/ooctipus/warp/commit/e1089a344bc245d9ea22da687a402224b72b20b9">mem_fragmentation · e1089a34</a>, including PRs <a href="https://github.com/ooctipus/warp/pull/1">#1</a> and <a href="https://github.com/ooctipus/warp/pull/4">#4</a>. “Landed” means our fork, not NVIDIA Warp main. <a href="https://github.com/ooctipus/warp/compare/0c1ed78f7b4ee397534e5bd1cea632af618d900f...e1089a344bc245d9ea22da687a402224b72b20b9">Full fork delta</a>: 51 files from the common ancestor <code>0c1ed78f</code>. Upstream main was checked at <a href="https://github.com/NVIDIA/warp/commit/104afd1f4b1f81ff87a8ee6be56c46807d8e3451">104afd1f</a>; its seven newer commits are not incorporated in this fork snapshot.</p>
 
     <h3>1. Exact capture records</h3>
     <p><code>record_launches=True</code> retains the emitted kernel node, launch settings, frozen argument bytes and resource owners on the existing <code>Graph</code>. Conditional records identify the actual containing if/while body. These facts let preparation reason about what CUDA will execute without reconstructing it from mutable Python objects. Invalid or incomplete recording blocks replay. <a href={`${warpSource}/warp/_src/context.py#L6517`}>Implementation</a>.</p>
@@ -88,5 +130,6 @@ wp.capture_launch(capture.graph)`}</CodeBlock>
     </div>
     <p className={styles.note}>Evidence for this exact merged source tree: 675 Warp tests run (5 skipped), GPU Components 217 tests plus 315 subtests, Newton 66, MJWarp 8. SO101: 3,561/3,795 successful episodes (93.83%), 76 heterogeneous worlds, 1,000 steps with dynamic resets on one prepared graph. Qualified on RTX 5090 / CUDA Toolkit 13.1; this does not establish upstream release readiness. <a href="https://github.com/ooctipus/warp/pull/4">Validation details</a>.</p>
     <p className={styles.note}>Downstream source callers already work with this cleanup. Distribution is separate: the private SO101 package still bundles Warp <code>3806983b</code> and needs a rebuilt wheel plus updated manifest/lockfile to receive PR4. The checkpoint does not change.</p>
+    </details>
   </article>;
 }

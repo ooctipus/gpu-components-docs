@@ -37,7 +37,8 @@ export default function DynamicCount() {
     <header className={styles.intro}>
       <p className={styles.eyebrow}>Dynamic count · the implementation map</p>
       <h2>How a Python count reaches CUDA</h2>
-      <p><code>CountParameter</code> names a count. Warp records its uses, prepares a GPU updater, and lets CUDA execute the updated launches. It does <strong>not</strong> require an allocation-discovery API.</p>
+      <p>After a reset, a group of robots might shrink from three worlds to two. Writing “2” into a GPU array does not automatically resize the work already recorded in a graph. <code>CountParameter</code> names that changing count; Warp connects it to the launches and updates them before they run.</p>
+      <p className={styles.note}>New to this integration? <a href="#landed-in-warp">Start with one robot reset and the three missing pieces</a>. Below, we follow the count through Python, Warp’s native interface and CUDA.</p>
       <p className={styles.note}>Source-checked against merged <code>mem_fragmentation</code> at <code>e1089a34</code>, after PRs #1 and #4. These APIs are in the fork, not Warp main. For all features and fixes, see <a href="#landed-in-warp">Landed in Warp</a>.</p>
     </header>
 
