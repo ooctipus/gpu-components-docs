@@ -1,6 +1,8 @@
+export const warpSource = 'https://github.com/ooctipus/warp/blob/e1089a344bc245d9ea22da687a402224b72b20b9';
+
 export const brief = {
   conclusion: "Keep addresses stable. Make work counts explicit. Let Warp own how its graphs execute.",
-  summary: "Two Warp features simplify different parts of this integration: virtual arrays with explicit backing operations, and GPU counts that control captured work. Count binding is implemented in PR1; virtual-array syntax remains a separate proposal. Newton still decides which worlds exist and when their state is ready.",
+  summary: "The fork implements capture records, GPU count updates, bounded memory operations and experimental allocation discovery/reuse. General virtual arrays with backing operations remain a proposal. Newton still decides which worlds exist and when their state is ready.",
   pins: [
     ["Warp", "52da84604e541b77cc0433b86385de5edb620abc", "ooctipus/warp"],
     ["GPU Components", "6cc307cd5066dbd434dc6e7fc1b21b6327e2100f", "ooctipus/gpu-components"],

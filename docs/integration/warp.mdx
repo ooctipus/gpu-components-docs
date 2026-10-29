@@ -1,7 +1,7 @@
 ---
 title: Warp integration
 sidebar_label: Warp integration
-description: A visual guide to GPU counts across caller, Warp and CUDA, with PR1 examples and a separate virtual-array proposal.
+description: "Every feature and fix in our Warp fork: capture records, GPU counts, bounded memory operations, allocation discovery, reuse proofs and shared native mechanisms."
 slug: /integration/warp
 hide_table_of_contents: true
 ---
@@ -10,7 +10,7 @@ import WarpIntegrationReview from '@site/src/components/WarpIntegrationReview';
 
 # Warp integration
 
-Explore **virtual arrays** and **GPU counts that control captured work**. The Dynamic count guide and count examples follow [Warp PR1](https://github.com/ooctipus/warp/pull/1); virtual-array syntax remains a separate proposal. These fork APIs are not yet in Warp main.
+Start with **Landed in Warp** for the complete fork delta, then explore **Dynamic count** for the caller → Warp → CUDA explanation. This guide follows `mem_fragmentation` at [`e1089a34`](https://github.com/ooctipus/warp/commit/e1089a344bc245d9ea22da687a402224b72b20b9), after PRs #1 and #4. These fork APIs are not yet in Warp main; general virtual-array syntax remains a proposal.
 
 For the current Newton, MJWarp and IsaacLab implementation, see [Integration, from reset to physics](../integration.md).
 

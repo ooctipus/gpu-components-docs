@@ -1,14 +1,14 @@
 import React, {useState} from 'react';
 import CodeBlock from '@theme/CodeBlock';
+import {warpSource as source} from './content';
 import styles from './dynamicCount.module.css';
 
-const source = 'https://github.com/dylanturpin/warp-octi/blob/ab467d988125a3545a8bfcae0152dd137e6f0b8e';
 const apiGroups = [
-  {title: 'Launch facts', status: 'Already on the base branch', names: ['CapturedLaunch', 'capture_get_launches'], reason: 'The binder needs to know which node uses n and where. PR1 reuses the canonical launch record. Exposing an inspection getter is a separate API choice; an application does not have to call it.'},
-  {title: 'Conditional support', status: 'Already on the base branch', names: ['CapturedConditionalBody', 'capture_get_conditional_bodies'], reason: 'Containment facts let the binder prove ordering when a consumer is inside an if/while body. Straight-line count updates do not require this extra scope, and the binder uses the internal facts rather than requiring a public getter call.'},
-  {title: 'Recorded fills and copies', status: 'Already on the base branch · separate extension', names: ['CapturedCopy', 'CapturedFill', 'capture_get_memory_operations'], reason: 'These describe memory operations. They are useful for explicit count-sized fills/copies and other capture consumers. A count used in ordinary kernel dimensions or integer arguments does not require them.'},
-  {title: 'Allocation discovery and temporary storage', status: 'Already on the base branch · not a count dependency', names: ['capture_allocation_bytes', 'capture_allocation_order', 'capture_discovery_memory', 'capture_get_allocations', 'capture_get_transient_regions', 'capture_region_precedes', 'capture_transient'], reason: 'These belong to the typed-allocation and transient-memory experiment: discover storage requests, describe lifetimes and prove reuse ordering. Dynamic counts work with ordinary, fully allocated arrays without these APIs.'},
-  {title: 'Count diagnostics', status: 'Added by PR1', names: ['capture_get_count_bound_launches', 'capture_get_count_update_errors'], reason: 'These let callers inspect which launches were bound and match their error words. They support observability; neither getter performs the update. The update entry point is capture_update_counts(counts, sources).'},
+  {title: 'Launch facts', status: 'Shared recording foundation', names: ['CapturedLaunch', 'capture_get_launches'], reason: 'The binder needs to know which node uses n and where. It reuses the canonical launch record. An application does not have to call the inspection getter.'},
+  {title: 'Conditional support', status: 'Shared containment facts', names: ['CapturedConditionalBody', 'capture_get_conditional_bodies'], reason: 'Containment lets the binder prove ordering for consumers inside if/while bodies. Straight-line count updates do not need this additional scope.'},
+  {title: 'Recorded fills and copies', status: 'Optional memory extension', names: ['CapturedCopy', 'CapturedFill', 'capture_get_memory_operations'], reason: 'These preserve original memory operands for explicit count-sized fills/copies. Counts used only in ordinary launch dimensions or integer arguments do not need them.'},
+  {title: 'Allocation discovery and temporary storage', status: 'Experimental · not a count dependency', names: ['CapturedAllocation', 'CapturedTransientRegion', 'capture_allocation_order', 'capture_discovery_memory', 'capture_get_allocations', 'capture_get_transient_regions', 'capture_transient'], reason: 'Discover storage requests and prove reuse ordering. Dynamic counts also work with ordinary, fully allocated arrays; this feature has a separate contract.'},
+  {title: 'Count diagnostics', status: 'Graph-owned binding results', names: ['capture_get_count_bound_launches', 'capture_get_count_update_errors'], reason: 'Match bound launches to their error words. Neither getter performs the update; capture_update_counts(counts, sources) records that operation.'},
 ];
 const fields = [
   {name: 'node_handle', kind: 'Recorded target', phase: 'Capture', value: 'update node U', why: 'Identifies the updater node so capture completion can attach the finished table to it.', minimum: 'The operation needs a target. This handle names the updater; target consumer handles live in the prepared table.'},
@@ -38,7 +38,7 @@ export default function DynamicCount() {
       <p className={styles.eyebrow}>Dynamic count · the implementation map</p>
       <h2>How a Python count reaches CUDA</h2>
       <p><code>CountParameter</code> names a count. Warp records its uses, prepares a GPU updater, and lets CUDA execute the updated launches. It does <strong>not</strong> require an allocation-discovery API.</p>
-      <p className={styles.note}>Source-checked against <a href="https://github.com/ooctipus/warp/pull/1">PR1</a> at <code>ab467d98</code>. The C++ file is <code>warp.cpp</code>. These count APIs are implemented in the fork, not Warp main.</p>
+      <p className={styles.note}>Source-checked against merged <code>mem_fragmentation</code> at <code>e1089a34</code>, after PRs #1 and #4. These APIs are in the fork, not Warp main. For all features and fixes, see <a href="#landed-in-warp">Landed in Warp</a>.</p>
     </header>
 
     <section aria-labelledby="dc-interface-title">
@@ -51,11 +51,11 @@ export default function DynamicCount() {
         <figcaption>A header declares the interface at build time. It is not another runtime stage. A CUDA call does not first pass through <code>warp.cpp</code> just because both files belong to the same library.</figcaption>
       </figure>
       <div className={styles.fileMap}>
-        <div><a href={`${source}/warp/native/warp.h#L812`}>warp.h</a><p>The native function contract: names, argument types and return types. PR1 declares four count helpers here; Python registers matching <code>ctypes</code> signatures.</p></div>
-        <div><a href={`${source}/warp/native/warp.cu#L3974`}>warp.cu</a><p>The CUDA implementation. Host code prepares graph nodes and loads the updater. Embedded GPU code reads counts and changes bounds, grids and scalar arguments during replay. A <code>.cu</code> file can contain both host and GPU code.</p></div>
-        <div><a href={`${source}/warp/native/warp.cpp`}>warp.cpp</a><p>Shared/CPU runtime implementation. This PR updates a shared layout-helper call and adds failure stubs for builds without CUDA, so the native interface remains available. It does not implement a second count updater.</p></div>
+        <div><a href={`${source}/warp/native/warp.h`}>warp.h</a><p>The native function contract: names, argument types and return types. It declares four count helpers; Python registers matching <code>ctypes</code> signatures.</p></div>
+        <div><a href={`${source}/warp/native/warp.cu`}>warp.cu</a><p>The CUDA implementation. Host code prepares graph nodes and loads the updater. Embedded GPU code reads counts and changes bounds, grids and scalar arguments during replay. A <code>.cu</code> file can contain both host and GPU code.</p></div>
+        <div><a href={`${source}/warp/native/warp.cpp`}>warp.cpp</a><p>Shared/CPU runtime implementation. The fork updates shared layout calls and supplies failure stubs for builds without CUDA, keeping the native interface available. It does not implement a second count updater.</p></div>
         <div><a href={`${source}/warp/native/launch.h`}>launch.h</a><p>One definition of launch-bounds layout and grid calculation, reused by ordinary launches and the updater. It contains no count registry, memory allocator or public Python API.</p></div>
-        <div><a href={`${source}/warp/native/apic.cpp`}>apic.cpp / apic.cu</a><p>API Capture records an operation stream for CPU replay and graph save/load, including rebuilding CUDA graphs. PR1 changes its layout-helper references to use <code>launch.h</code>; it does <strong>not</strong> add dynamic-count support to APIC.</p></div>
+        <div><a href={`${source}/warp/native/apic.cpp`}>apic.cpp / apic.cu</a><p>API Capture records an operation stream for CPU replay and graph save/load, including rebuilding CUDA graphs. The fork reuses <code>launch.h</code> and the common struct traversal; it does <strong>not</strong> add dynamic-count support to APIC.</p></div>
       </div>
       <figure className={styles.sharedHeader}><code>launch.h</code><span>shared at compile time →</span><div><span>ordinary launch code</span><span>GPU count updater</span><span>APIC layout reconstruction</span></div><figcaption>APIC appears in this diff because duplicated layout calculations were consolidated. Count replay still uses the live CUDA graph path.</figcaption></figure>
     </section>
@@ -70,20 +70,19 @@ export default function DynamicCount() {
     </section>
 
     <section className={styles.section} aria-labelledby="dc-surface-title">
-      <h3 id="dc-surface-title">Why does the PR show so many APIs?</h3>
-      <p><strong>14 of the 16 names below were already public on <code>mem_fragmentation</code>.</strong> Regenerating <code>docs/api_reference/warp.rst</code> added their missing index entries to PR1’s documentation diff. Those additions are not evidence that implementing a count requires all these features.</p>
+      <h3 id="dc-surface-title">Which APIs belong to which feature?</h3>
+      <p>The fork has several cooperating features. Count binding uses launch and containment facts; allocation discovery is optional. This list reflects the merged API surface.</p>
       <div className={styles.apiGroups}>{apiGroups.map(group => <section key={group.title}><div><h4>{group.title}</h4><small>{group.status}</small></div><div>{group.names.map(name => <code key={name}>{name}</code>)}</div><p>{group.reason}</p></section>)}</div>
-      <p>Against this base, PR1 adds only three public exports: <code>capture_update_counts</code> and the two count diagnostic getters. <code>CountParameter</code>, <code>upper_bound</code> and the capture records already exist on that base. An upstream proposal must still account for its minimal prerequisites.</p>
-      <p className={styles.note}>Compare the <a href="https://github.com/ooctipus/warp/blob/63e41fc1d53eedc931d3492c64da063cf604f71b/warp/__init__.py#L248">base exports</a> with the <a href={`${source}/warp/__init__.py#L470`}>PR1 exports</a>. The unrelated allocation APIs should be reviewed as a separate feature, not justified by CountParameter.</p>
+      <p className={styles.note}>Historically, PR1 added missing documentation entries for 14 already-public names; it did not introduce all those features. PR4 subsequently removed <code>capture_allocation_bytes</code> and <code>capture_region_precedes</code>, plus the two preparation bypass hooks. The <a href="#landed-in-warp">complete overview</a> lists their replacements and all 21 added public exports relative to main.</p>
     </section>
 
     <details className={styles.details}>
       <summary>Explore replay behavior, the five retained fields and supported limits</summary>
     <header className={styles.intro}>
-      <p className={styles.eyebrow}>A visual guide · Warp PR1</p>
+      <p className={styles.eyebrow}>A visual guide · merged Warp fork</p>
       <h2>One graph. A different amount of work.</h2>
       <p>A GPU calculation produces a count. Warp connects that number to recorded launches. CUDA runs the same graph with updated work sizes and integer arguments.</p>
-      <p className={styles.note}>Implemented in <a href="https://github.com/ooctipus/warp/pull/1">PR1</a> at <code>ab467d98</code>, on the custom <code>mem_fragmentation</code> foundation. This is not an API in Warp main. The controls below illustrate the contract; they do not execute CUDA.</p>
+      <p className={styles.note}>Count binding landed through <a href="https://github.com/ooctipus/warp/pull/1">PR1</a>; <a href="https://github.com/ooctipus/warp/pull/4">PR4</a> consolidated its ownership and shared mechanisms. The controls illustrate the contract; they do not execute CUDA.</p>
     </header>
 
     <section className={styles.section} aria-labelledby="dc-count-title">
@@ -190,7 +189,7 @@ class _CountUpdate:
     errors: warp.array | None = None
     table: warp.array | None = None
     bound_launches: tuple[CapturedLaunch, ...] = ()`}</CodeBlock><a href={`${source}/warp/_src/context.py#L6597`}>Pinned implementation</a></details>
-      <details className={styles.details}><summary>What is inside the GPU table?</summary><div className={styles.tableLayout}><span>Launch offsets</span><span>Launch A header + scalar records</span><span>Launch B header + scalar records</span></div><p>Each header stores <code>node</code>, <code>axis_source</code>, <code>axis_maximum</code>, <code>rank</code>, <code>coord_mult</code>, <code>block_dim</code>, <code>max_blocks</code>, <code>grid_stride</code>, <code>bounds_offset</code> and <code>scalar_count</code>. These tell the updater which node to patch and how to preserve the launch’s layout and scheduling settings.</p><p>Every scalar occurrence adds <code>source</code>, <code>offset</code> and <code>maximum</code>. The number of scalar entries is variable; PR1 has no fixed four-scalar cap. The header’s four axis slots match Warp’s existing four-dimensional launch limit.</p><a href={`${source}/warp/native/warp.cu#L3974`}>Pinned native representation</a></details>
+      <details className={styles.details}><summary>What is inside the GPU table?</summary><div className={styles.tableLayout}><span>Launch offsets</span><span>Launch A header + scalar records</span><span>Launch B header + scalar records</span></div><p>Each header stores <code>node</code>, <code>axis_source</code>, <code>axis_maximum</code>, <code>rank</code>, <code>coord_mult</code>, <code>block_dim</code>, <code>max_blocks</code>, <code>grid_stride</code>, <code>bounds_offset</code> and <code>scalar_count</code>. These tell the updater which node to patch and how to preserve the launch’s layout and scheduling settings.</p><p>Every scalar occurrence adds <code>source</code>, <code>offset</code> and <code>maximum</code>. The number of scalar entries is variable; PR1 has no fixed four-scalar cap. The header’s four axis slots match Warp’s existing four-dimensional launch limit.</p><a href={`${source}/warp/native/warp.cu#L4036`}>Pinned native representation</a></details>
       <div className={styles.omitted}><strong>Fields we do not need to add</strong><p>A second graph handle on every update (the owning Graph already has it); a stored record index (returned from list position); separate counts/sources copies (already paired); another launch ledger (records are canonical); a separate user-errors field (the same errors field retains either buffer).</p></div>
     </section>
 
@@ -203,11 +202,11 @@ class _CountUpdate:
     </section>
 
     <section className={styles.section} aria-labelledby="dc-scope-title">
-      <div className={styles.sectionHeading}><span>07</span><div><h3 id="dc-scope-title">What PR1 covers, and what remains</h3><p>A scoped CUDA feature with a useful long-term ownership boundary.</p></div></div>
+      <div className={styles.sectionHeading}><span>07</span><div><h3 id="dc-scope-title">What count support covers, and what remains</h3><p>A scoped CUDA feature with a useful long-term ownership boundary.</p></div></div>
       <div className={styles.scope}><div><h4>Implemented in this fork</h4><ul><li>Explicit bindings and ordinary forward launches.</li><li>Dimension and int32 scalar occurrences, including repeated uses.</li><li>Zero → positive recovery; per-launch error reporting.</li><li>Consumers in supported callback-based conditional bodies.</li><li>Prefix fills/copies through the base branch’s recorded memory-operation kernels.</li></ul></div><div><h4>Requires further work</h4><ul><li>Update points inside conditional or while bodies.</li><li>Embedding an already prepared count graph in another capture.</li><li>CPU/APIC, serialization and deferred capture integration.</li><li>Backward, deterministic and clustered recorded launches.</li><li>Upstream agreement on the API and its capture prerequisites.</li></ul></div></div>
       <p className={styles.note}>Requires CUDA Toolkit and driver 12.4+, int32 count sources on the capture device, and Warp-owned recorded capture. Sources and optional error buffers are allocated before capture. Error buffers must be disjoint from sources and each other.</p>
       <p>Warp’s <a href="https://github.com/NVIDIA/warp/issues/1659">deferred graph proposal</a> uses its APIC operation stream. Long term, count uses and update points should integrate with that representation, with CUDA handles created during native graph construction. That is an integration direction, not support already delivered by PR1.</p>
-      <footer className={styles.references}><strong>Read the source</strong><a href={`${source}/warp/_src/types.py#L54`}>Count identity</a><a href={`${source}/warp/_src/context.py#L13980`}>Public binding API</a><a href={`${source}/warp/_src/context.py#L14216`}>Preparation</a><a href={`${source}/warp/native/launch.h`}>Shared launch math</a><a href="https://docs.nvidia.com/cuda/archive/12.9.0/cuda-runtime-api/group__CUDART__GRAPH.html">CUDA graph APIs</a></footer>
+      <footer className={styles.references}><strong>Read the source</strong><a href={`${source}/warp/_src/types.py#L54`}>Count identity</a><a href={`${source}/warp/_src/context.py#L13969`}>Public binding API</a><a href={`${source}/warp/_src/context.py#L14177`}>Preparation</a><a href={`${source}/warp/native/launch.h`}>Shared launch math</a><a href="https://docs.nvidia.com/cuda/archive/12.9.0/cuda-runtime-api/group__CUDART__GRAPH.html">CUDA graph APIs</a></footer>
     </section>
     </details>
   </article>;
